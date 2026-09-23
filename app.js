@@ -1606,9 +1606,21 @@
     const inputs = el.querySelectorAll('.pl input[data-linha]');
     inputs.forEach((inp) => {
       inp.addEventListener('focus', () => { inp.select(); mostrarBarraCelula(barra, inp.dataset.linha, inp.dataset.mes); });
+      // No Chrome e no Safari, soltar o clique desfaz a seleção feita no foco: mantém o texto todo selecionado.
+      inp.addEventListener('mouseup', (e) => { if (!inp._jaSelecionado) { e.preventDefault(); inp._jaSelecionado = true; } });
+      inp.addEventListener('blur', () => { inp._jaSelecionado = false; });
       inp.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); moverFoco(inp, e.shiftKey ? -1 : 1); inp.blur(); }
         else if (e.key === 'Escape') { inp.value = inp.defaultValue; inp.blur(); }
+        else if (e.key === 'Delete' && inp.selectionStart === 0 && inp.selectionEnd === inp.value.length) {
+          // Delete com a célula toda selecionada: volta ao padrão na hora, como no Excel
+          e.preventDefault();
+          gravarCelula(inp.dataset.linha, inp.dataset.mes, null);
+          agendarSalvar();
+          recalcularProjecao({ linha: inp.dataset.linha, mes: inp.dataset.mes });
+          const nova = document.querySelector(`.pl input[data-linha="${inp.dataset.linha}"][data-mes="${inp.dataset.mes}"]`);
+          if (nova) mostrarBarraCelula(barra, nova.dataset.linha, nova.dataset.mes);
+        }
       });
       inp.addEventListener('change', () => {
         const v = lerNumero(inp.value);

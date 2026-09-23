@@ -1037,12 +1037,18 @@
       const mt = movTotal.get(c.id) || new Array(n).fill(0);
       const mi = movInterno.get(c.id) || new Array(n).fill(0);
       const ss = snapsPorConta.get(c.id) || [];
-      let acum = 0, j = 0, ultimoSnap = null, anteriorBRL = 0;
+      // Saldo = último snapshot + movimentos posteriores a ele (aportes e resgates que o snapshot ainda não viu).
+      // Antes do primeiro snapshot, só a soma das transações. Investimento não fica negativo: se os resgates
+      // passaram os aportes antes de existir snapshot, a diferença foi ganho e o saldo fica em zero.
+      let acum = 0, j = 0, ultimoSnap = null, acumNoSnap = 0, anteriorBRL = 0;
       for (let i = 0; i < n; i++) {
         acum += mt[i];
         const limite = addMeses(meses[i], 1);
-        while (j < ss.length && ss[j].data < limite) { ultimoSnap = ss[j].valor; j++; }
-        const saldo = ultimoSnap != null ? ultimoSnap : acum;
+        let novo = false;
+        while (j < ss.length && ss[j].data < limite) { ultimoSnap = ss[j].valor; j++; novo = true; }
+        if (novo) acumNoSnap = acum;
+        let saldo = ultimoSnap != null ? ultimoSnap + (acum - acumNoSnap) : acum;
+        if (INVEST.includes(cls) || c.tipo === 'investimento') saldo = Math.max(0, saldo);
         const conv = c.moeda === 'USD' ? cambios[i] : 1;
         const saldoBRL = saldo * conv;
         const r = regs[i];
@@ -1091,7 +1097,8 @@
     const ultimo = real.regs[real.regs.length - 1];
     const taxaM = (a) => Math.pow(1 + (Number(a) || 0) / 100, 1 / 12) - 1;
     const saldo = { caixa: ultimo.saldo.caixa, rf: ultimo.saldo.rf, outros: ultimo.saldo.outros, bens: ultimo.saldo.bens };
-    let cambioAnt = d.cambio || ultimo.cambio || 5.5;
+    // parte do dólar do fim do último mês realizado (o mesmo usado para converter os saldos), sem salto
+    let cambioAnt = ultimo.cambio || d.cambio || 5.5;
     let rvUSD = ultimo.saldo.rv / (ultimo.cambio || cambioAnt);
     let salAnt = d.salario;
     let gastoAnt = d.gasto;

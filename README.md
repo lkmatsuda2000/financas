@@ -49,9 +49,16 @@ Sem isso, o link enviado por e-mail não traz você de volta ao app.
 
 ## Telas
 
-- **# painel:** patrimônio, receitas × gastos dos últimos 6 meses, principais gastos do mês e saldos.
+- **# painel:** começa com dois gráficos de barras empilhadas por categoria, cada um com filtro de período, clique no mês para ver o detalhe e botão (olho) para ocultar os valores:
+  - **Gastos por mês**, em duas visões: *Compras* (pela data da compra, inclusive no cartão) e *Caixa* (o que saiu das contas; o cartão aparece como "Faturas de cartão" no mês do pagamento).
+    Alterna entre *Barras* (composição do mês) e *Linhas* (evolução em R$). Nas linhas, o total aparece por padrão e cada categoria é ligada ou desligada pela legenda; com uma só linha visível, aparece também a média móvel de 3 meses (tracejada).
+  - **Entradas por mês**, com opção de incluir as receitas extraordinárias (Doação e Herança).
+  Os dois consideram só lançamentos em reais e ignoram categorias internas. Abaixo deles: patrimônio, receitas × gastos dos últimos 6 meses, principais gastos do mês e saldos.
 - **# transações:** lançamentos do mês, agrupados por dia, com filtros por conta e categoria. Clique em um lançamento para editar ou apagar.
 - **# cartões:** fatura em aberto e últimas compras de cada cartão.
 - **# investimentos:** aplicado, rendimento e valor atual de cada investimento, com opção de ver os encerrados.
+- **# projeção:** modelo no formato P&L. Os meses fechados vêm da base (realizado); a partir do mês seguinte ao último com dados, tudo é calculado pelas premissas (salário, reajustes, 13º, férias, bônus, gastos, aportes e divisão entre classes, retornos, câmbio, inflação e IR médio por classe). O aporte planejado sempre acontece e a diferença entre o resultado e o aporte vai para o caixa; o app avisa quando o caixa fica abaixo do mínimo. As premissas ficam na tabela `premissas_projecao` (crie com `premissas_projecao.sql`, trocando o e-mail).
 
 O campo na parte de baixo de cada tela registra gastos, receitas e transferências entre contas (inclusive o pagamento de fatura, que é uma transferência da conta para o cartão).
+
+As transferências registradas pelo app gravam os dois lados ligados pelo campo `transferencia_par_id` (cada lado aponta para o outro). Ao editar ou apagar um lado, o app altera os dois juntos. As transferências antigas da base ainda não têm essa ligação; ao abrir uma delas, o app avisa que a alteração vale só para aquele lado.

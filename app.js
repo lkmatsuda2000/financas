@@ -875,16 +875,19 @@
 
   // Valores de partida das premissas de nível (valem até alguém digitar outro valor numa célula)
   const NIVEIS_PADRAO = {
-    outrasRec: 0, pctInv: 20, pctRf: 60, pctRv: 30, pctOut: 10,
+    outrasRec: 0, pctInv: 100, pctRf: 60, pctRv: 30, pctOut: 10,
     cdi: 14, caixaCdi: 100, rfCdi: 105, rvRet: 8, outRet: 10,
     cambioVar: 3, inflacao: 4, irCaixa: 20, irRf: 10, irRv: 15, irOut: 15, caixaMin: 3
   };
-  const PREMISSAS_PADRAO = { v: 2, horizonteAnos: 10, salarioCats: null, classes: {}, niveis: { ...NIVEIS_PADRAO }, celulas: {} };
+  const PREMISSAS_PADRAO = { v: 3, horizonteAnos: 10, salarioCats: null, classes: {}, niveis: { ...NIVEIS_PADRAO }, celulas: {} };
 
   // Converte premissas salvas na versão anterior (painel lateral) para células.
   function migrarPremissas(salvo, primeiroProj, horizonte) {
     if (!salvo) return JSON.parse(JSON.stringify(PREMISSAS_PADRAO));
-    if (salvo.v === 2) {
+    if (salvo.v === 2 || salvo.v === 3) {
+      // v2 → v3: o aporte passou a ser % do resultado do mês (antes era % do salário).
+      // Se o valor de partida ainda era o padrão antigo (20% do salário), vira 100% do resultado.
+      if (salvo.v === 2 && salvo.niveis && Number(salvo.niveis.pctInv) === 20) salvo.niveis.pctInv = 100;
       return { ...JSON.parse(JSON.stringify(PREMISSAS_PADRAO)), ...salvo,
         niveis: { ...NIVEIS_PADRAO, ...(salvo.niveis || {}) }, celulas: salvo.celulas || {}, classes: salvo.classes || {} };
     }
@@ -1128,14 +1131,21 @@
       const resultado = receitas - gas.rec - gas.saz;
 
       // Aportes
+      // Aportes: % do resultado do mês (receitas − gastos). Mês negativo não aporta; o caixa cobre.
+      // A divisão entre as classes é em % do valor a investir: se somar menos de 100%, o resto fica no caixa;
+      // se passar de 100%, vale a ordem renda fixa → variável → outros até completar 100%, e a linha
+      // "Soma da divisão" fica em vermelho para avisar.
       const pctInv = niv('pctInv');
       const divs = { rf: niv('pctRf'), rv: niv('pctRv'), outros: niv('pctOut') };
-      const somaDiv = divs.rf + divs.rv + divs.outros || 1;
-      const aporteBase = salario * pctInv / 100;
+      drv.somaDiv = divs.rf + divs.rv + divs.outros;
+      let resta = 100;
+      const efet = {};
+      for (const c of ['rf', 'rv', 'outros']) { efet[c] = Math.max(0, Math.min(divs[c], resta)); resta -= efet[c]; }
+      const aInvestir = Math.max(0, resultado) * pctInv / 100;
       const ap = {
-        rf: ovr('apRf', aporteBase * divs.rf / somaDiv),
-        rv: ovr('apRv', aporteBase * divs.rv / somaDiv),
-        outros: ovr('apOut', aporteBase * divs.outros / somaDiv),
+        rf: ovr('apRf', aInvestir * efet.rf / 100),
+        rv: ovr('apRv', aInvestir * efet.rv / 100),
+        outros: ovr('apOut', aInvestir * efet.outros / 100),
         bens: 0, caixa: 0
       };
       const aporte = ap.rf + ap.rv + ap.outros;
@@ -1179,7 +1189,7 @@
     try {
       const row = await q(sb.from('premissas_projecao').select('dados').eq('id', 'principal').maybeSingle());
       const dados = row && row.dados;
-      return { p: migrarPremissas(dados, primeiroProj), tabelaFalta: false, migrado: !!(dados && dados.v !== 2) };
+      return { p: migrarPremissas(dados, primeiroProj), tabelaFalta: false, migrado: !!(dados && dados.v !== 3) };
     } catch (err) {
       return { p: migrarPremissas(null, primeiroProj), tabelaFalta: true };
     }
@@ -1288,7 +1298,7 @@
           <div class="kpi-s muted">aportados, mais ${esc(fmt(rendLiq))} de rendimento líquido de IR</div></div>
         <div class="kpi ${alerta ? 'kpi-alerta' : ''}"><div class="kpi-l">Caixa x mínimo</div>
           <div class="kpi-v" style="font-size:18px">${alerta ? 'Abaixo em ' + esc(mesNome(alerta.mes)) : 'Sempre acima'}</div>
-          <div class="kpi-s muted">${alerta ? 'os aportes consomem o caixa' : 'no horizonte projetado'}</div></div>
+          <div class="kpi-s muted">${alerta ? 'meses negativos ou aportes digitados consomem o caixa' : 'no horizonte projetado'}</div></div>
       </div>`;
   }
 
@@ -1396,13 +1406,14 @@
       ], total: ['Total de gastos', gastos] },
       { destaque: ['Resultado', (r) => receitas(r) - gastos(r)] },
       { grupo: 'dest', nome: 'Destino do resultado', linhas: [
-        L('pctInv', 'Parte do salário investida', 'nivel', drv('pctInv'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('pctInv', 'Parte do resultado investida', 'nivel', drv('pctInv'), { fmt: 'pct', agg: 'fim', sub: true }),
         L('apRf', 'Aporte em renda fixa', 'ovr', (r) => r.ap.rf),
         L('pctRf', 'Para renda fixa, % do aporte', 'nivel', drv('pctRf'), { fmt: 'pct', agg: 'fim', sub: true }),
         L('apRv', 'Aporte em renda variável', 'ovr', (r) => r.ap.rv),
         L('pctRv', 'Para renda variável, % do aporte', 'nivel', drv('pctRv'), { fmt: 'pct', agg: 'fim', sub: true }),
         L('apOut', 'Aporte em outros', 'ovr', (r) => r.ap.outros),
         L('pctOut', 'Para outros, % do aporte', 'nivel', drv('pctOut'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('somaDiv', 'Soma da divisão (abaixo de 100%, o resto fica no caixa)', 'check', drv('somaDiv'), { fmt: 'pct', agg: 'fim', sub: true }),
         L('apBens', 'Aporte em imóvel e bens', 'calc', (r) => r.ap.bens),
         L('rendCx', 'Rendimento líquido do caixa', 'calc', rendCaixaLiq),
         L('outMov', 'Outros movimentos', 'calc', (r) => r.outrosMov)
@@ -1483,7 +1494,8 @@
         return `<td class="proj ed ${set ? 'set' : ''} ${herdado ? 'herd' : ''} ${l.tipo}"><input type="text" inputmode="decimal"
           data-linha="${l.id}" data-mes="${m}" value="${esc(mostra)}" aria-label="${esc(l.nome)}, ${esc(mesNome(m))}"></td>`;
       }
-      return `<td class="num ${t} ${cls || ''} ${negativo ? 'neg-v' : ''} ${l.sub ? 'drv' : ''}">${esc(l.fmt === 'rs' ? (v == null ? '' : fmtInt(v)) : texto(l, v))}</td>`;
+      const erroSoma = l.tipo === 'check' && v != null && v > 100.001;
+      return `<td class="num ${t} ${cls || ''} ${negativo || erroSoma ? 'neg-v' : ''} ${l.sub ? 'drv' : ''}">${esc(l.fmt === 'rs' ? (v == null ? '' : fmtInt(v)) : texto(l, v))}</td>`;
     }).join('');
     const vazia = (l) => !EDITAVEL.has(l.tipo) && periodos.every((per) => { const v = valor(l, per); return v == null || Math.abs(v) < 0.5; });
 

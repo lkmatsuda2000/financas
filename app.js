@@ -1142,12 +1142,11 @@
       // A divisão entre as classes é em % do valor a investir: se somar menos de 100%, o resto fica no caixa;
       // se passar de 100%, vale a ordem renda fixa → variável → outros até completar 100%, e a linha
       // "Soma da divisão" fica em vermelho para avisar.
+      // Cada classe recebe exatamente o % digitado do valor a investir, sem ajuste automático.
+      // Soma abaixo de 100%: o resto fica no caixa. Acima de 100%: o excesso sai do caixa (linha de soma em vermelho).
       const pctInv = niv('pctInv');
-      const divs = { rf: niv('pctRf'), rv: niv('pctRv'), outros: niv('pctOut') };
-      drv.somaDiv = divs.rf + divs.rv + divs.outros;
-      let resta = 100;
-      const efet = {};
-      for (const c of ['rf', 'rv', 'outros']) { efet[c] = Math.max(0, Math.min(divs[c], resta)); resta -= efet[c]; }
+      const efet = { rf: Math.max(0, niv('pctRf')), rv: Math.max(0, niv('pctRv')), outros: Math.max(0, niv('pctOut')) };
+      drv.somaDiv = efet.rf + efet.rv + efet.outros;
       const aInvestir = Math.max(0, resultado) * pctInv / 100;
       const ap = {
         rf: ovr('apRf', aInvestir * efet.rf / 100),
@@ -1420,7 +1419,7 @@
         L('pctRv', 'Para renda variável, % do aporte', 'nivel', drv('pctRv'), { fmt: 'pct', agg: 'fim', sub: true }),
         L('apOut', 'Aporte em outros', 'ovr', (r) => r.ap.outros),
         L('pctOut', 'Para outros, % do aporte', 'nivel', drv('pctOut'), { fmt: 'pct', agg: 'fim', sub: true }),
-        L('somaDiv', 'Soma da divisão (abaixo de 100%, o resto fica no caixa)', 'check', drv('somaDiv'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('somaDiv', 'Soma da divisão (abaixo de 100%, o resto fica no caixa; acima, o excesso sai do caixa)', 'calc', drv('somaDiv'), { fmt: 'pct', agg: 'fim', sub: true }),
         L('apBens', 'Aporte em imóvel e bens', 'calc', (r) => r.ap.bens),
         L('rendCx', 'Rendimento líquido do caixa', 'calc', rendCaixaLiq),
         L('outMov', 'Outros movimentos', 'calc', (r) => r.outrosMov)
@@ -1499,9 +1498,9 @@
         const val = l.fmt === 'rs' && P.valores === 'hoje' ? per.regs[0] && l.get(per.regs[0]) : v; // edita sempre em valor nominal
         const mostra = l.fmt === 'rs' ? (val ? Math.round(val).toLocaleString('pt-BR') : '') : texto(l, val);
         return `<td class="proj ed ${set ? 'set' : ''} ${herdado ? 'herd' : ''} ${l.tipo}"><input type="text" inputmode="decimal"
-          data-linha="${l.id}" data-mes="${m}" value="${esc(mostra)}" aria-label="${esc(l.nome)}, ${esc(mesNome(m))}"></td>`;
+          data-linha="${l.id}" data-mes="${m}" value="${esc(mostra)}" placeholder="${l.fmt === 'rs' ? '–' : ''}" aria-label="${esc(l.nome)}, ${esc(mesNome(m))}"></td>`;
       }
-      const erroSoma = l.tipo === 'check' && v != null && v > 100.001;
+      const erroSoma = l.id === 'somaDiv' && v != null && v > 100.001;
       return `<td class="num ${t} ${cls || ''} ${negativo || erroSoma ? 'neg-v' : ''} ${l.sub ? 'drv' : ''}">${esc(l.fmt === 'rs' ? (v == null ? '' : fmtInt(v)) : texto(l, v))}</td>`;
     }).join('');
     const vazia = (l) => !EDITAVEL.has(l.tipo) && periodos.every((per) => { const v = valor(l, per); return v == null || Math.abs(v) < 0.5; });
@@ -1704,7 +1703,7 @@
           <p class="muted" style="margin:0 0 6px;font-size:13px">Valem até você digitar outro valor numa célula. Salário, gasto e dólar partem do realizado (média dos últimos 3 meses, média dos últimos 12 meses e última cotação).</p>
           <div class="cfg-grid">${Object.keys(NIVEIS_PADRAO).map((id) => {
             const l = linhaPorId(id);
-            return l ? `<label class="pm"><span>${esc(l.nome)}</span><span class="pm-in"><input type="text" inputmode="decimal" data-nivel="${id}" value="${esc(fmtPct(p.niveis[id]))}"></span></label>` : '';
+            return l && l.tipo === 'nivel' ? `<label class="pm"><span>${esc(l.nome)}</span><span class="pm-in"><input type="text" inputmode="decimal" data-nivel="${id}" value="${esc(fmtPct(p.niveis[id]))}"></span></label>` : '';
           }).join('')}</div>
           <div class="actions">
             <button type="button" class="btn danger" id="cfg-zerar">Apagar todas as premissas digitadas</button>

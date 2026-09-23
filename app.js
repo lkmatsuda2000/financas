@@ -224,7 +224,8 @@
   // Só considera lançamentos em reais e ignora categorias internas (transferências, repasses, saldo inicial).
   const FATURAS = 'Faturas de cartão';
   const DEMAIS = 'Categorias menores';   // soma das categorias que não cabem entre as 7 maiores do período
-  const CORES_GRAF = ['#2F6FED', '#1C9A6C', '#E0A63B', '#8A5AC2', '#D8594C', '#2BA3B8', '#C2569B', '#7A8F2E'];
+  const CORES_GRAF = ['#2F6FED', '#1C9A6C', '#E0A63B', '#8A5AC2', '#D8594C', '#2BA3B8', '#C2569B', '#7A8F2E',
+    '#1E3A8A', '#B45309', '#0F766E', '#9F1239'];
   const COR_FATURAS = '#4A5866';
   const COR_DEMAIS = '#A7B0B9';
   const EXTRAORDINARIAS = ['Doação', 'Herança'];
@@ -304,9 +305,87 @@
       const todos = mesesDisponiveis();
       const ate = todos[todos.length - 1];
       state.graf[chave] = { ate, de: addMeses(ate, -11) < todos[0] ? todos[0] : addMeses(ate, -11),
-        visao: 'compras', extra: false, ocultar: false, sel: null };
+        visao: 'compras', extra: false, ocultar: false, sel: null, modo: 'barras', linhas: [TOTAL] };
     }
     return state.graf[chave];
+  }
+
+  // ---------- Visão em linhas (evolução em R$) ----------
+  // Mostra o total e/ou as categorias escolhidas. Quando só uma linha está visível, desenha também
+  // a média móvel de 3 meses dela, para mostrar a tendência sem o ruído de meses atípicos.
+  const TOTAL = 'Total';
+  const COR_TOTAL = 'var(--text)';
+
+  function escalaBonita(max) {
+    if (max <= 0) return { topo: 1000, passo: 250 };
+    const bruto = max / 4;
+    const pot = Math.pow(10, Math.floor(Math.log10(bruto)));
+    const passo = [1, 2, 2.5, 5, 10].map((f) => f * pot).find((p) => p >= bruto);
+    return { topo: Math.ceil(max / passo) * passo, passo };
+  }
+
+  function svgLinhas({ meses, series, corDe, g, largura }) {
+    const H = 250, topo = 18, base = 28, esq = g.ocultar ? 22 : 40, dir = 26;
+    const n = meses.length;
+    const W = Math.max(largura, n * 22 + esq + dir);
+    const passoX = n > 1 ? (W - esq - dir) / (n - 1) : 0;
+    const x = (i) => (n > 1 ? esq + i * passoX : (W - esq - dir) / 2 + esq);
+
+    const umaSo = series.length === 1;
+    const maxV = Math.max(0, ...series.flatMap((s) => s.valores.map((v) => v.v)),
+      ...(umaSo ? series[0].mediaMovel.filter((v) => v != null) : []));
+    const { topo: yMax, passo } = escalaBonita(maxV);
+    const y = (v) => topo + (1 - v / yMax) * (H - topo - base);
+
+    let grade = '';
+    for (let v = 0; v <= yMax + 0.001; v += passo) {
+      grade += `<line x1="${esq}" x2="${W - dir}" y1="${y(v)}" y2="${y(v)}" class="grid"/>`;
+      if (!g.ocultar) grade += `<text x="${esq - 6}" y="${y(v) + 4}" class="tick" text-anchor="end">${esc(emMil(v))}</text>`;
+    }
+    const cada = Math.max(1, Math.ceil(34 / Math.max(passoX, 1)));
+    const rotulos = meses.map((m, i) => ((i % cada === 0 && n - 1 - i >= cada) || i === n - 1)
+      ? `<text x="${x(i)}" y="${H - 8}" class="tick ${m === g.sel ? 'sel' : ''}" text-anchor="middle">${esc(mesNome(m))}</text>` : '').join('');
+
+    const caminho = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+    let linhas = '';
+    for (const s of series) {
+      if (umaSo && s.mediaMovel) {
+        const pts = s.mediaMovel.map((v, i) => (v == null ? null : [x(i), y(v)])).filter(Boolean);
+        if (pts.length > 1) linhas += `<path d="${caminho(pts)}" class="ma" style="stroke:${corDe(s.nome)}"/>`;
+      }
+      linhas += `<path d="${caminho(s.valores.map((p, i) => [x(i), y(p.v)]))}" class="ln" style="stroke:${corDe(s.nome)}"/>`;
+      if (n <= 36) linhas += s.valores.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.v)}" r="2.6" style="fill:${corDe(s.nome)}"/>`).join('');
+    }
+
+    // Mês selecionado: guia vertical, pontos maiores e valores
+    const iSel = meses.indexOf(g.sel);
+    let marca = '';
+    if (iSel >= 0) {
+      marca += `<line x1="${x(iSel)}" x2="${x(iSel)}" y1="${topo - 6}" y2="${H - base}" class="guia"/>`;
+      const ladoEsq = x(iSel) > W - 70;
+      const rot = [];
+      for (const s of series) {
+        const v = s.valores[iSel].v;
+        marca += `<circle cx="${x(iSel)}" cy="${y(v)}" r="4.5" class="pt-sel" style="fill:${corDe(s.nome)}"/>`;
+        rot.push({ yy: y(v) - 7, v, c: corDe(s.nome) });
+      }
+      if (!g.ocultar) {
+        // Afasta os rótulos que ficariam um em cima do outro
+        rot.sort((a, b) => a.yy - b.yy);
+        for (let i = 1; i < rot.length; i++) if (rot[i].yy - rot[i - 1].yy < 13) rot[i].yy = rot[i - 1].yy + 13;
+        for (const r of rot) {
+          marca += `<text x="${x(iSel) + (ladoEsq ? -8 : 8)}" y="${Math.max(12, r.yy)}" class="val" style="fill:${r.c}" text-anchor="${ladoEsq ? 'end' : 'start'}">${esc(emMil(r.v))}</text>`;
+        }
+      }
+    }
+    const faixas = meses.map((m, i) => {
+      const x0 = i === 0 ? 0 : (x(i - 1) + x(i)) / 2;
+      const x1 = i === n - 1 ? W : (x(i) + x(i + 1)) / 2;
+      return `<rect x="${x0}" y="0" width="${Math.max(1, x1 - x0)}" height="${H}" class="hit" data-mes="${m}"><title>${esc(mesLongo(m))}</title></rect>`;
+    }).join('');
+
+    return `<svg class="linechart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Evolução dos gastos">
+      ${faixas}${grade}${rotulos}${linhas}${marca}</svg>`;
   }
 
   async function montarGrafico(el, chave) {
@@ -315,6 +394,9 @@
     const todos = mesesDisponiveis();
     if (g.de > g.ate) [g.de, g.ate] = [g.ate, g.de];
     const titulo = chave === 'gastos' ? 'Gastos por mês' : 'Entradas por mês';
+    const emLinhas = chave === 'gastos' && g.modo === 'linhas';
+    // Em linhas, busca 2 meses antes do início para a média móvel já valer no primeiro mês.
+    const deBusca = emLinhas ? (addMeses(g.de, -2) < todos[0] ? todos[0] : addMeses(g.de, -2)) : g.de;
 
     const vez = (el._vez = (el._vez || 0) + 1);   // descarta respostas de cliques anteriores
     let lista;
@@ -322,7 +404,7 @@
       const card = el.querySelector('.chart-card');
       if (card) card.classList.add('loading');
       else el.innerHTML = `<div class="chart-card"><h2>${titulo}</h2><div class="empty">Carregando...</div></div>`;
-      lista = await transacoesDoPeriodo(g.de, g.ate);
+      lista = await transacoesDoPeriodo(deBusca, g.ate);
     } catch (err) {
       if (vez !== el._vez) return;
       el.innerHTML = `<div class="chart-card"><h2>${titulo}</h2><div class="empty">Não foi possível carregar: ${esc(err.message)}</div></div>`;
@@ -333,7 +415,9 @@
     // Meses do período e totais por mês e categoria
     const meses = [];
     for (let m = g.de; m <= g.ate; m = addMeses(m, 1)) meses.push(m);
-    const porMes = new Map(meses.map((m) => [m, new Map()]));
+    const mesesBusca = [];
+    for (let m = deBusca; m <= g.ate; m = addMeses(m, 1)) mesesBusca.push(m);
+    const porMes = new Map(mesesBusca.map((m) => [m, new Map()]));
     const totalCat = new Map();
     for (const t of lista) {
       const grupo = classificar(t, chave, g);
@@ -343,7 +427,7 @@
       if (!mapa) continue;
       const v = Number(t.valor) || 0;
       mapa.set(grupo, (mapa.get(grupo) || 0) + v);
-      totalCat.set(grupo, (totalCat.get(grupo) || 0) + v);
+      if (m >= g.de) totalCat.set(grupo, (totalCat.get(grupo) || 0) + v);
     }
 
     // Séries: as maiores categorias do período; o resto vai para "Demais categorias".
@@ -430,6 +514,51 @@
         : 'Pelo que saiu das contas: o cartão aparece como fatura, no mês em que foi paga.')
       : (g.extra ? 'Todas as receitas, inclusive doações e herança.' : 'Receitas do dia a dia, sem doações e herança.');
 
+    // Visão em linhas: séries mensais em R$ e média móvel de 3 meses
+    let areaGrafico, legenda;
+    if (emLinhas) {
+      const valorMes = (nome, m) => {
+        const mapa = porMes.get(m);
+        if (!mapa) return 0;
+        return nome === TOTAL ? [...mapa.values()].reduce((a, b) => a + b, 0) : (mapa.get(nome) || 0);
+      };
+      const corLinha = (nome) => (nome === TOTAL ? COR_TOTAL : (cor.has(nome) && nome !== DEMAIS ? cor.get(nome) : corDaCategoria(nome)));
+      g.linhas = g.linhas.filter((nome) => nome === TOTAL || totalCat.has(nome));
+      if (!g.linhas.length) g.linhas = [TOTAL];
+      const serieDe = (nome) => {
+        const valores = meses.map((m) => ({ m, v: valorMes(nome, m) }));
+        const mediaMovel = meses.map((m) => {
+          const janela = [addMeses(m, -2), addMeses(m, -1), m];
+          if (janela[0] < deBusca) return null;
+          return janela.reduce((a, j) => a + valorMes(nome, j), 0) / 3;
+        });
+        return { nome, valores, mediaMovel };
+      };
+      const largura = Math.max(280, (el.clientWidth || 800) - (window.innerWidth <= 760 ? 26 : 34));
+      areaGrafico = svgLinhas({ meses, g, largura, corDe: corLinha, series: g.linhas.map(serieDe) });
+      const opcoes = [TOTAL, ...ordenadas];
+      legenda = `<div class="chart-legend line-legend" role="group" aria-label="Linhas visíveis">
+          ${opcoes.map((nome) => {
+            const on = g.linhas.includes(nome);
+            return `<button type="button" class="leg-btn ${on ? 'on' : ''}" data-linha="${esc(nome)}" aria-pressed="${on}">
+              <i style="background:${corLinha(nome)}"></i>${esc(nome)}</button>`;
+          }).join('')}
+        </div>
+        <div class="meta muted" style="font-size:12.5px">${g.linhas.length === 1
+          ? 'A linha tracejada é a média móvel de 3 meses. Clique em outras categorias para comparar.'
+          : 'Clique numa categoria para ligar ou desligar a linha. Com uma só linha, aparece a média móvel de 3 meses.'}</div>`;
+    } else {
+      areaGrafico = `<div class="chart" style="--n:${meses.length};grid-template-columns:repeat(${meses.length}, minmax(44px, 1fr))">${colunas}</div>`;
+      legenda = `<div class="chart-legend">
+          ${series.map((n) => `<span ${n === DEMAIS ? `title="${esc(ordenadas.filter((x) => !principais.includes(x)).join(', '))}"` : ''}><i style="background:${cor.get(n)}"></i>${esc(n === DEMAIS ? `${DEMAIS} (${ordenadas.filter((x) => !principais.includes(x)).length})` : n)}</span>`).join('') || '<span class="muted">Nada registrado no período.</span>'}
+        </div>`;
+    }
+    const modoBtn = chave === 'gastos'
+      ? `<div class="seg seg-sm" role="radiogroup" aria-label="Tipo de gráfico">
+          <label><input type="radio" name="modo-${chave}" value="barras" ${g.modo === 'barras' ? 'checked' : ''}><span>Barras</span></label>
+          <label><input type="radio" name="modo-${chave}" value="linhas" ${g.modo === 'linhas' ? 'checked' : ''}><span>Linhas</span></label>
+        </div>` : '';
+
     el.innerHTML = `
       <div class="chart-card">
         <div class="chart-head">
@@ -445,7 +574,7 @@
           </button>
         </div>
         <div class="chart-controls">
-          ${alternador}
+          <div class="modos">${modoBtn}${alternador}</div>
           <div class="periodo">
             ${presets.map(([n, r]) => `<button type="button" class="chip-btn ${presetAtivo(n) ? 'on' : ''}" data-preset="${n}">${r}</button>`).join('')}
             <span class="intervalo">
@@ -456,10 +585,8 @@
           </div>
         </div>
         ${mostrar ? '<div class="axis-title">R$ mil</div>' : ''}
-        <div class="chart-scroll"><div class="chart" style="--n:${meses.length};grid-template-columns:repeat(${meses.length}, minmax(44px, 1fr))">${colunas}</div></div>
-        <div class="chart-legend">
-          ${series.map((n) => `<span ${n === DEMAIS ? `title="${esc(ordenadas.filter((x) => !principais.includes(x)).join(', '))}"` : ''}><i style="background:${cor.get(n)}"></i>${esc(n === DEMAIS ? `${DEMAIS} (${ordenadas.filter((x) => !principais.includes(x)).length})` : n)}</span>`).join('') || '<span class="muted">Nada registrado no período.</span>'}
-        </div>
+        <div class="chart-scroll">${areaGrafico}</div>
+        ${legenda}
         <div class="chart-detail">
           <h3>${esc(mesLongo(g.sel))} <span class="num">${esc(fmt(selecionado ? selecionado.total : 0))}</span></h3>
           <div class="rows">${detalhe}</div>
@@ -469,10 +596,18 @@
     const scroll = el.querySelector('.chart-scroll');
     const colSel = el.querySelector('.col.sel');
     if (colSel) scroll.scrollLeft = Math.max(0, colSel.offsetLeft - scroll.clientWidth + colSel.offsetWidth + 16);
+    else if (emLinhas) scroll.scrollLeft = scroll.scrollWidth;
 
     const redesenhar = () => montarGrafico(el, chave);
     el.querySelector('[data-ocultar]').onclick = () => { g.ocultar = !g.ocultar; redesenhar(); };
-    el.querySelectorAll('.col').forEach((b) => b.addEventListener('click', () => { g.sel = b.dataset.mes; redesenhar(); }));
+    el.querySelectorAll('.col, .hit').forEach((b) => b.addEventListener('click', () => { g.sel = b.dataset.mes; redesenhar(); }));
+    el.querySelectorAll(`input[name="modo-${chave}"]`).forEach((r) => r.addEventListener('change', (e) => { g.modo = e.target.value; redesenhar(); }));
+    el.querySelectorAll('[data-linha]').forEach((b) => b.addEventListener('click', () => {
+      const nome = b.dataset.linha;
+      g.linhas = g.linhas.includes(nome) ? g.linhas.filter((x) => x !== nome) : [...g.linhas, nome];
+      if (!g.linhas.length) g.linhas = [TOTAL];
+      redesenhar();
+    }));
     el.querySelectorAll(`input[name="visao-${chave}"]`).forEach((r) => r.addEventListener('change', (e) => { g.visao = e.target.value; redesenhar(); }));
     const extra = el.querySelector('[data-extra]');
     if (extra) extra.onchange = (e) => { g.extra = e.target.checked; redesenhar(); };
@@ -917,6 +1052,16 @@
     await carregarBase();
     renderShell();
   }
+
+  // O gráfico de linhas é desenhado na largura da tela: redesenha ao girar o celular ou redimensionar a janela.
+  let tResize;
+  window.addEventListener('resize', () => {
+    clearTimeout(tResize);
+    tResize = setTimeout(() => {
+      const el = document.getElementById('g-gastos');
+      if (el && state.graf && state.graf.gastos && state.graf.gastos.modo === 'linhas') montarGrafico(el, 'gastos');
+    }, 200);
+  });
 
   // ---------- Início ----------
   window.addEventListener('hashchange', () => { if (state.user) renderShell(); });

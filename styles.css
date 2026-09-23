@@ -244,7 +244,8 @@ tr.closed td { color: var(--muted); }
 }
 .chip-btn.on { border-color: var(--accent); color: var(--accent); }
 .chart-scroll { overflow-x: auto; padding-bottom: 4px; }
-.chart { display: grid; gap: 4px; align-items: end; min-width: 100%; }
+.chart { display: grid; gap: 2px; align-items: end; min-width: 100%; }
+.axis-title { font-size: 12px; font-weight: 600; color: var(--muted); margin: 8px 0 -4px; }
 .col {
   display: flex; flex-direction: column; align-items: stretch; border: 0; background: none;
   padding: 4px 0 2px; border-radius: var(--radius-s); cursor: pointer; color: inherit;
@@ -254,9 +255,8 @@ tr.closed td { color: var(--muted); }
 .col.sel .col-label { color: var(--text); font-weight: 700; }
 .col-area { height: 214px; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
 .col-total { font-size: 11px; font-weight: 700; margin-bottom: 3px; }
-.stack { width: 72%; max-width: 44px; display: flex; flex-direction: column-reverse; border-radius: 4px 4px 0 0; overflow: hidden; }
+.stack { width: 78%; max-width: 120px; display: flex; flex-direction: column-reverse; border-radius: 2px 2px 0 0; overflow: hidden; }
 .seg-bar { display: grid; place-items: center; min-height: 0; }
-.seg-bar + .seg-bar { box-shadow: 0 -1px 0 var(--bg) inset; }
 .seg-bar span { font-size: 10px; font-weight: 700; color: #fff; line-height: 1; white-space: nowrap; text-shadow: 0 0 2px rgba(0,0,0,.35); }
 .col-label { font-size: 12px; color: var(--muted); text-align: center; margin-top: 5px; white-space: nowrap; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }

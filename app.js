@@ -223,7 +223,7 @@
   // Entradas: receitas por categoria, com opção de incluir as extraordinárias (Doação, Herança).
   // Só considera lançamentos em reais e ignora categorias internas (transferências, repasses, saldo inicial).
   const FATURAS = 'Faturas de cartão';
-  const DEMAIS = 'Demais categorias';
+  const DEMAIS = 'Categorias menores';   // soma das categorias que não cabem entre as 7 maiores do período
   const CORES_GRAF = ['#2F6FED', '#1C9A6C', '#E0A63B', '#8A5AC2', '#D8594C', '#2BA3B8', '#C2569B', '#7A8F2E'];
   const COR_FATURAS = '#4A5866';
   const COR_DEMAIS = '#A7B0B9';
@@ -235,7 +235,8 @@
     d.setMonth(d.getMonth() + n, 1);
     return isoLocal(d);
   };
-  const compacto = (v) => new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: v < 1000 ? 0 : 1 }).format(v);
+  // Valores do gráfico em milhares de reais, sem unidade (a unidade vai no título do eixo).
+  const emMil = (v) => (v / 1000).toLocaleString('pt-BR', { minimumFractionDigits: v >= 100000 ? 0 : 1, maximumFractionDigits: v >= 100000 ? 0 : 1 });
   // Cada categoria mantém a mesma cor em todos os gráficos e visões durante a sessão.
   const coresFixas = new Map();
   function corDaCategoria(nome) {
@@ -383,26 +384,28 @@
         const v = d.valores.get(n);
         const h = d.total ? (v / d.total) * hTotal : 0;
         return `<div class="seg-bar" style="height:${h.toFixed(1)}px;background:${cor.get(n)}" title="${esc(n)}: ${esc(fmt(v))}">
-          ${mostrar && h >= 16 ? `<span>${esc(compacto(v))}</span>` : ''}</div>`;
+          ${mostrar && h >= 16 ? `<span>${esc(emMil(v))}</span>` : ''}</div>`;
       }).join('');
       return `
         <button type="button" class="col ${d.mes === g.sel ? 'sel' : ''}" data-mes="${d.mes}"
           aria-label="${esc(mesLongo(d.mes))}: ${esc(fmt(d.total))}" aria-pressed="${d.mes === g.sel}">
           <div class="col-area">
-            ${mostrar && d.total > 0 ? `<div class="col-total num">${esc(compacto(d.total))}</div>` : ''}
+            ${mostrar && d.total > 0 ? `<div class="col-total num">${esc(emMil(d.total))}</div>` : ''}
             <div class="stack">${segs}</div>
           </div>
           <div class="col-label">${esc(mesNome(d.mes))}</div>
         </button>`;
     }).join('');
 
+    // O detalhe mostra cada categoria separada, inclusive as que estão somadas em "Categorias menores".
+    const brutoSel = porMes.get(g.sel) || new Map();
     const detalhe = selecionado && selecionado.total > 0
-      ? series.filter((n) => selecionado.valores.get(n) > 0)
-        .sort((a, b) => selecionado.valores.get(b) - selecionado.valores.get(a))
-        .map((n) => {
-          const v = selecionado.valores.get(n);
-          return `<div class="row"><span class="dot" style="background:${cor.get(n)}"></span>
-            <div class="grow">${esc(n)}</div>
+      ? [...brutoSel.entries()].filter(([, v]) => v > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([n, v]) => {
+          const menor = !principais.includes(n);
+          return `<div class="row"><span class="dot" style="background:${cor.get(menor ? DEMAIS : n)}"></span>
+            <div class="grow">${esc(n)}${menor ? ' <span class="muted" style="font-size:12px">· em categorias menores</span>' : ''}</div>
             <div class="muted num">${Math.round((v / selecionado.total) * 100)}%</div>
             <div class="num" style="min-width:110px;text-align:right">${esc(fmt(v))}</div></div>`;
         }).join('')
@@ -452,9 +455,10 @@
             </span>
           </div>
         </div>
+        ${mostrar ? '<div class="axis-title">R$ mil</div>' : ''}
         <div class="chart-scroll"><div class="chart" style="--n:${meses.length};grid-template-columns:repeat(${meses.length}, minmax(44px, 1fr))">${colunas}</div></div>
         <div class="chart-legend">
-          ${series.map((n) => `<span><i style="background:${cor.get(n)}"></i>${esc(n)}</span>`).join('') || '<span class="muted">Nada registrado no período.</span>'}
+          ${series.map((n) => `<span ${n === DEMAIS ? `title="${esc(ordenadas.filter((x) => !principais.includes(x)).join(', '))}"` : ''}><i style="background:${cor.get(n)}"></i>${esc(n === DEMAIS ? `${DEMAIS} (${ordenadas.filter((x) => !principais.includes(x)).length})` : n)}</span>`).join('') || '<span class="muted">Nada registrado no período.</span>'}
         </div>
         <div class="chart-detail">
           <h3>${esc(mesLongo(g.sel))} <span class="num">${esc(fmt(selecionado ? selecionado.total : 0))}</span></h3>

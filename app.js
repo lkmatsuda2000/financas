@@ -584,20 +584,35 @@
   // ---------- Início ----------
   window.addEventListener('hashchange', () => { if (state.user) renderShell(); });
 
-  sb.auth.onAuthStateChange(async (_evento, session) => {
-    const user = session ? session.user : null;
-    if (user && (!state.user || state.user.id !== user.id)) {
-      state.user = user;
-      app.innerHTML = '<div class="login"><div class="login-card"><p>Carregando suas finanças...</p></div></div>';
-      try {
-        await carregarBase();
-        renderShell();
-      } catch (err) {
-        renderLogin('Entrou, mas não foi possível ler os dados: ' + err.message);
+  // Erro devolvido pelo link do e-mail (ex.: link expirado ou já usado)
+  const erroLink = (() => {
+    const h = new URLSearchParams(location.hash.replace(/^#\/?/, ''));
+    const qs = new URLSearchParams(location.search);
+    const msg = h.get('error_description') || qs.get('error_description');
+    return msg ? 'O link não funcionou: ' + msg.replace(/\+/g, ' ') + '. Peça um novo link.' : '';
+  })();
+
+  async function entrar(user) {
+    state.user = user;
+    app.innerHTML = '<div class="login"><div class="login-card"><p>Carregando suas finanças...</p></div></div>';
+    try {
+      await carregarBase();
+      if (location.hash.includes('access_token') || location.hash.includes('error')) {
+        history.replaceState(null, '', location.pathname + '#/painel');
       }
-    } else if (!user) {
-      state.user = null;
-      renderLogin();
+      renderShell();
+    } catch (err) {
+      renderLogin('Você entrou, mas os dados não carregaram: ' + err.message +
+        '. Confira se este e-mail é o mesmo do script de segurança.');
     }
+  }
+
+  // As consultas ficam fora do callback de autenticação para não travar a sessão.
+  sb.auth.onAuthStateChange((_evento, session) => {
+    const user = session ? session.user : null;
+    setTimeout(() => {
+      if (user && (!state.user || state.user.id !== user.id)) entrar(user);
+      else if (!user) { state.user = null; renderLogin(erroLink); }
+    }, 0);
   });
 })();

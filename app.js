@@ -23,7 +23,8 @@
     posicao: [],
     meses: [],
     filtros: { mes: null, conta: '', categoriaNome: '' },
-    mostrarEncerrados: false
+    mostrarEncerrados: false,
+    sideOculta: (() => { try { return localStorage.getItem('fin:sideOculta') === '1'; } catch (e) { return false; } })()
   };
 
   // ---------- Utilidades ----------
@@ -144,7 +145,7 @@
       .sort((a, b) => a.nome.localeCompare(b.nome));
 
     app.innerHTML = `
-      <div class="shell" id="shell">
+      <div class="shell ${state.sideOculta ? 'side-oculta' : ''}" id="shell">
         <aside class="sidebar" aria-label="Navegação">
           <div class="workspace">
             <div class="ws-name">Minhas finanças</div>
@@ -174,7 +175,7 @@
         </aside>
         <main class="main">
           <header class="channel-header">
-            <button class="menu-btn" type="button" id="menu" aria-label="Abrir menu">☰</button>
+            <button class="menu-btn" type="button" id="menu" aria-label="Mostrar ou esconder a barra lateral" title="Mostrar ou esconder a barra lateral">☰</button>
             <div>
               <h1># ${esc(canal.nome)}</h1>
               <p class="topic">${esc(canal.topico)}</p>
@@ -191,7 +192,14 @@
 
     document.getElementById('sair').onclick = () => sb.auth.signOut();
     document.getElementById('novo').onclick = () => abrirForm();
-    document.getElementById('menu').onclick = () => document.getElementById('shell').classList.toggle('nav-open');
+    document.getElementById('menu').onclick = () => {
+      const shell = document.getElementById('shell');
+      if (window.matchMedia('(max-width: 760px)').matches) { shell.classList.toggle('nav-open'); return; }
+      state.sideOculta = !state.sideOculta;
+      shell.classList.toggle('side-oculta', state.sideOculta);
+      try { localStorage.setItem('fin:sideOculta', state.sideOculta ? '1' : '0'); } catch (e) { /* sem armazenamento */ }
+      window.dispatchEvent(new Event('resize'));   // os gráficos se ajustam à nova largura
+    };
     app.querySelectorAll('[data-conta]').forEach((b) => b.addEventListener('click', () => {
       state.filtros.conta = b.dataset.conta;
       state.filtros.categoriaNome = '';
@@ -848,10 +856,13 @@
   }
 
   // =====================================================================
-  // ---------- # projeção (modelo: realizado + premissas) ----------
-  // Meses fechados vêm da base; a partir do mês seguinte ao último com dados, tudo é calculado pelas
-  // premissas. Regra central: o aporte planejado sempre acontece e a diferença entre o resultado do
-  // mês e o aporte vai para o caixa. IR: alíquota média por classe, descontada do rendimento todo mês.
+  // ---------- # projeção (modelo no formato de planilha) ----------
+  // Meses fechados vêm da base (realizado). Nos meses seguintes, cada premissa é uma célula do P&L:
+  //  - "nível" (taxas, % investido...): vale a partir do mês em que foi digitada até ser trocada;
+  //  - "evento" (variação %, gasto pontual...): vale só no mês digitado;
+  //  - linhas calculadas (salário, 13º, aportes, dólar...) têm fórmula padrão e aceitam um valor
+  //    digitado por cima; o salário, o gasto e o dólar seguem a partir do valor digitado.
+  // Regra do caixa: os aportes sempre acontecem e a diferença entre o resultado e os aportes vai para o caixa.
   // =====================================================================
   const CLASSES = [
     { id: 'caixa', nome: 'Caixa', cor: '#2BA3B8' },
@@ -861,55 +872,52 @@
   ];
   const CLASSES_CONTA = [...CLASSES, { id: 'bens', nome: 'Imóvel e bens' }, { id: 'fora', nome: 'Não considerar' }];
   const INVEST = ['rf', 'rv', 'outros'];
-  const NOMES_MES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
-  const PREMISSAS_PADRAO = {
-    v: 1,
-    horizonteAnos: 10,
-    salarioCats: null,            // null = categorias de entrada com "salário" no nome
-    salarioBase: null,            // null = média dos últimos 3 meses realizados
-    reajusteAnualPct: 5,
-    reajusteAnualMes: 3,
-    reajustesPontuais: [],        // [{ mes: 'AAAA-MM-01', pct }]
-    decimoTerceiro: true,         // metade em novembro, metade em dezembro
-    feriasMes: 1,                 // mês do terço de férias (0 = não considerar)
-    bonus: [],                    // [{ mesAno: 1..12, multiplo }] todo ano
-    outrasReceitasMensal: 0,
-    gastoBase: null,              // null = média dos últimos 12 meses realizados
-    gastoCrescimentoPct: 4,
-    gastosSazonais: [],           // [{ mesAno, valor, desc }] todo ano, corrigidos pelo crescimento
-    gastosPontuais: [],           // [{ mes, valor, desc }]
-    pctInvestir: 20,              // % do salário
-    divisao: { rf: 60, rv: 30, outros: 10 },
-    cdiPct: 14,
-    caixaPctCdi: 100,
-    rfPctCdi: 105,
-    rvRetornoPct: 8,              // em dólar
-    outrosRetornoPct: 10,
-    cambioInicial: null,          // null = última cotação da base
-    cambioVariacaoPct: 3,
-    inflacaoPct: 4,
-    ir: { caixa: 20, rf: 10, rv: 15, outros: 15 },
-    caixaMinimoMeses: 3,
-    classes: {}                   // conta_id -> classe (vazio = regra padrão)
+  // Valores de partida das premissas de nível (valem até alguém digitar outro valor numa célula)
+  const NIVEIS_PADRAO = {
+    outrasRec: 0, pctInv: 20, pctRf: 60, pctRv: 30, pctOut: 10,
+    cdi: 14, caixaCdi: 100, rfCdi: 105, rvRet: 8, outRet: 10,
+    cambioVar: 3, inflacao: 4, irCaixa: 20, irRf: 10, irRv: 15, irOut: 15, caixaMin: 3
   };
+  const PREMISSAS_PADRAO = { v: 2, horizonteAnos: 10, salarioCats: null, classes: {}, niveis: { ...NIVEIS_PADRAO }, celulas: {} };
 
-  function mesclar(padrao, salvo) {
-    if (Array.isArray(padrao)) return Array.isArray(salvo) ? salvo : padrao.slice();
-    if (padrao && typeof padrao === 'object') {
-      const out = {};
-      for (const k of Object.keys(padrao)) out[k] = mesclar(padrao[k], salvo ? salvo[k] : undefined);
-      if (salvo && typeof salvo === 'object') for (const k of Object.keys(salvo)) if (!(k in out)) out[k] = salvo[k];
-      return out;
+  // Converte premissas salvas na versão anterior (painel lateral) para células.
+  function migrarPremissas(salvo, primeiroProj, horizonte) {
+    if (!salvo) return JSON.parse(JSON.stringify(PREMISSAS_PADRAO));
+    if (salvo.v === 2) {
+      return { ...JSON.parse(JSON.stringify(PREMISSAS_PADRAO)), ...salvo,
+        niveis: { ...NIVEIS_PADRAO, ...(salvo.niveis || {}) }, celulas: salvo.celulas || {}, classes: salvo.classes || {} };
     }
-    return salvo === undefined ? padrao : salvo;
-  }
-  const lerCaminho = (o, cam) => cam.split('.').reduce((a, k) => (a == null ? a : a[k]), o);
-  function gravarCaminho(o, cam, v) {
-    const ks = cam.split('.');
-    let a = o;
-    for (let i = 0; i < ks.length - 1; i++) a = a[ks[i]] = a[ks[i]] || {};
-    a[ks[ks.length - 1]] = v;
+    const p = JSON.parse(JSON.stringify(PREMISSAS_PADRAO));
+    p.horizonteAnos = salvo.horizonteAnos || 10;
+    p.salarioCats = salvo.salarioCats || null;
+    p.classes = salvo.classes || {};
+    const n = p.niveis, d = salvo.divisao || {}, ir = salvo.ir || {};
+    Object.assign(n, {
+      outrasRec: salvo.outrasReceitasMensal ?? n.outrasRec, pctInv: salvo.pctInvestir ?? n.pctInv,
+      pctRf: d.rf ?? n.pctRf, pctRv: d.rv ?? n.pctRv, pctOut: d.outros ?? n.pctOut,
+      cdi: salvo.cdiPct ?? n.cdi, caixaCdi: salvo.caixaPctCdi ?? n.caixaCdi, rfCdi: salvo.rfPctCdi ?? n.rfCdi,
+      rvRet: salvo.rvRetornoPct ?? n.rvRet, outRet: salvo.outrosRetornoPct ?? n.outRet,
+      cambioVar: salvo.cambioVariacaoPct ?? n.cambioVar, inflacao: salvo.gastoCrescimentoPct ?? salvo.inflacaoPct ?? n.inflacao,
+      irCaixa: ir.caixa ?? n.irCaixa, irRf: ir.rf ?? n.irRf, irRv: ir.rv ?? n.irRv, irOut: ir.outros ?? n.irOut,
+      caixaMin: salvo.caixaMinimoMeses ?? n.caixaMin
+    });
+    const set = (id, m, v) => { (p.celulas[id] = p.celulas[id] || {})[m] = v; };
+    const meses = [];
+    for (let k = 0; k < p.horizonteAnos * 12; k++) meses.push(addMeses(primeiroProj, k));
+    if (salvo.salarioBase != null) set('sal', primeiroProj, Number(salvo.salarioBase));
+    if (salvo.gastoBase != null) set('gasto', primeiroProj, Number(salvo.gastoBase));
+    if (salvo.cambioInicial != null) set('cambio', primeiroProj, Number(salvo.cambioInicial));
+    for (const m of meses) {
+      const ma = Number(m.slice(5, 7));
+      if (salvo.reajusteAnualPct && ma === Number(salvo.reajusteAnualMes)) set('salVar', m, Number(salvo.reajusteAnualPct));
+      for (const b of salvo.bonus || []) if (Number(b.mesAno) === ma) set('bonusMult', m, Number(b.multiplo) || 0);
+      for (const g of salvo.gastosSazonais || []) if (Number(g.mesAno) === ma) set('gastoPont', m, Number(g.valor) || 0);
+    }
+    for (const rj of salvo.reajustesPontuais || []) set('salVar', rj.mes, Number(rj.pct) || 0);
+    for (const g of salvo.gastosPontuais || []) set('gastoPont', g.mes, Number(g.valor) || 0);
+    if (salvo.decimoTerceiro === false) for (const m of meses) if (/-1[12]-/.test(m)) set('decimo', m, 0);
+    return p;
   }
 
   function classePadrao(c) {
@@ -974,28 +982,26 @@
 
   // ---------- Realizado ----------
   const zeros = () => ({ caixa: 0, rf: 0, rv: 0, outros: 0, bens: 0 });
+  const IR_ID = { caixa: 'irCaixa', rf: 'irRf', rv: 'irRv', outros: 'irOut' };
 
   function calcularRealizado(hist, p) {
-    // Do primeiro lançamento da base até o último mês com dados
     const disp = mesesDisponiveis();
     const primeiroTx = hist.tx.length ? hist.tx[0].data_competencia.slice(0, 8) + '01' : disp[0];
     const meses = [];
     for (let m = primeiroTx < disp[0] ? primeiroTx : disp[0]; m <= disp[disp.length - 1]; m = addMeses(m, 1)) meses.push(m);
     const n = meses.length;
     const idx = new Map(meses.map((m, i) => [m, i]));
-    const cambioReserva = Number(p.cambioInicial) || 5.5;
-    const cambios = meses.map((m) => cambioAte(hist, addMeses(m, 1), cambioReserva));
+    const cambios = meses.map((m) => cambioAte(hist, addMeses(m, 1), 5.5));
     const salCats = new Set(p.salarioCats || state.categorias
       .filter((k) => k.tipo === 'entrada' && !k.interna && /sal[aá]rio/i.test(k.nome)).map((k) => k.id));
 
-    const regs = meses.map((m) => ({
-      mes: m, real: true,
+    const regs = meses.map((m, i) => ({
+      mes: m, real: true, drv: {},
       rec: { salario: 0, decimo: 0, ferias: 0, bonus: 0, outras: 0, extra: 0 },
       gas: { rec: 0, saz: 0 }, ap: zeros(), rend: zeros(), ir: zeros(), saldo: zeros(),
-      outrosMov: 0, alerta: false, cambio: cambios[idx.get(m)]
+      outrosMov: 0, alerta: false, cambio: cambios[i]
     }));
 
-    // Movimento de cada conta por mês (na moeda da conta) e separação das internas
     const movTotal = new Map();
     const movInterno = new Map();
     const arr = (mapa, id) => { if (!mapa.has(id)) mapa.set(id, new Array(n).fill(0)); return mapa.get(id); };
@@ -1020,7 +1026,6 @@
       } else r.gas.rec += vBRL;
     }
 
-    // Saldos no fim de cada mês: snapshot quando houver, senão soma das transações
     const snapsPorConta = new Map();
     for (const s of hist.snaps) { if (!snapsPorConta.has(s.conta_id)) snapsPorConta.set(s.conta_id, []); snapsPorConta.get(s.conta_id).push(s); }
     for (const c of state.contas) {
@@ -1040,7 +1045,6 @@
         const r = regs[i];
         r.saldo[cls] += saldoBRL;
         if (cls === 'caixa') {
-          // No caixa só as contas com snapshot (ex.: Caixinha) têm rendimento
           if (ss.length) r.rend.caixa += saldoBRL - anteriorBRL - mt[i] * conv;
         } else {
           r.ap[cls] += mi[i] * conv;
@@ -1050,24 +1054,32 @@
       }
     }
 
-    // Conciliação do caixa e IR estimado (informativo: no realizado os saldos são brutos)
     for (let i = 0; i < n; i++) {
       const r = regs[i];
       const receitas = Object.values(r.rec).reduce((a, b) => a + b, 0);
       const aportado = r.ap.rf + r.ap.rv + r.ap.outros + r.ap.bens;
       const varCaixa = r.saldo.caixa - (i ? regs[i - 1].saldo.caixa : 0);
       r.outrosMov = varCaixa - (receitas - r.gas.rec - aportado + r.rend.caixa);
-      for (const cls of ['caixa', ...INVEST]) r.ir[cls] = Math.max(0, r.rend[cls]) * (Number(p.ir[cls]) || 0) / 100;
-      r.irInformativo = true;
+      for (const cls of ['caixa', ...INVEST]) r.ir[cls] = Math.max(0, r.rend[cls]) * (Number(p.niveis[IR_ID[cls]]) || 0) / 100;
     }
 
     const ult = regs.slice(-12);
     const derivados = {
       salario: regs.slice(-3).reduce((a, r) => a + r.rec.salario, 0) / Math.max(1, Math.min(3, regs.length)),
       gasto: ult.reduce((a, r) => a + r.gas.rec, 0) / Math.max(1, ult.length),
-      cambio: hist.cotacoes.length ? hist.cotacoes[hist.cotacoes.length - 1].v : null
+      cambio: hist.cotacoes.length ? hist.cotacoes[hist.cotacoes.length - 1].v : regs[regs.length - 1].cambio
     };
     return { regs, derivados };
+  }
+
+  // ---------- Leitura das células ----------
+  const celula = (p, id, m) => (p.celulas[id] && p.celulas[id][m] != null ? Number(p.celulas[id][m]) : undefined);
+  function nivel(p, id, m) {
+    // último valor digitado até este mês; se não houver, o valor de partida
+    const cel = p.celulas[id];
+    let melhor = null;
+    if (cel) for (const k of Object.keys(cel)) if (k <= m && cel[k] != null && (melhor == null || k > melhor)) melhor = k;
+    return melhor != null ? Number(cel[melhor]) : Number(p.niveis[id]) || 0;
   }
 
   // ---------- Projeção ----------
@@ -1075,169 +1087,192 @@
     const d = real.derivados;
     const ultimo = real.regs[real.regs.length - 1];
     const taxaM = (a) => Math.pow(1 + (Number(a) || 0) / 100, 1 / 12) - 1;
-    const cdi = Number(p.cdiPct) || 0;
-    const r = {
-      caixa: taxaM(cdi * (Number(p.caixaPctCdi) || 0) / 100),
-      rf: taxaM(cdi * (Number(p.rfPctCdi) || 0) / 100),
-      rv: taxaM(p.rvRetornoPct),
-      outros: taxaM(p.outrosRetornoPct)
-    };
-    const aliq = (cls) => (Number(p.ir[cls]) || 0) / 100;
-    const cambio0 = Number(p.cambioInicial) || d.cambio || ultimo.cambio || 5.5;
     const saldo = { caixa: ultimo.saldo.caixa, rf: ultimo.saldo.rf, outros: ultimo.saldo.outros, bens: ultimo.saldo.bens };
-    let rvUSD = ultimo.saldo.rv / (ultimo.cambio || cambio0);
-    let cambioAnt = cambio0;
-    let salario = p.salarioBase != null && p.salarioBase !== '' ? Number(p.salarioBase) : d.salario;
-    const gasto0 = p.gastoBase != null && p.gastoBase !== '' ? Number(p.gastoBase) : d.gasto;
-    const div = p.divisao;
-    const somaDiv = (Number(div.rf) || 0) + (Number(div.rv) || 0) + (Number(div.outros) || 0) || 1;
+    let cambioAnt = d.cambio || ultimo.cambio || 5.5;
+    let rvUSD = ultimo.saldo.rv / (ultimo.cambio || cambioAnt);
+    let salAnt = d.salario;
+    let gastoAnt = d.gasto;
     const n = Math.max(1, Math.round(Number(p.horizonteAnos) || 1)) * 12;
     const regs = [];
+    let fatorInf = 1;
 
     for (let k = 1; k <= n; k++) {
       const m = addMeses(ultimo.mes, k);
       const mesAno = Number(m.slice(5, 7));
-      if (Number(p.reajusteAnualPct) && mesAno === Number(p.reajusteAnualMes)) salario *= 1 + Number(p.reajusteAnualPct) / 100;
-      for (const rj of p.reajustesPontuais) if (rj.mes === m) salario *= 1 + (Number(rj.pct) || 0) / 100;
+      const drv = {};
+      const niv = (id) => (drv[id] = nivel(p, id, m));
+      const evt = (id) => (drv[id] = celula(p, id, m) || 0);
+      const ovr = (id, formula) => { const c = celula(p, id, m); return c != null ? c : formula; };
 
+      // Receitas
+      const salVar = evt('salVar');
+      const salario = ovr('sal', salAnt * (1 + salVar / 100));
+      salAnt = salario;
+      const bonusMult = evt('bonusMult');
       const rec = {
         salario,
-        decimo: p.decimoTerceiro && (mesAno === 11 || mesAno === 12) ? salario / 2 : 0,
-        ferias: Number(p.feriasMes) === mesAno ? salario / 3 : 0,
-        bonus: p.bonus.filter((b) => Number(b.mesAno) === mesAno).reduce((a, b) => a + (Number(b.multiplo) || 0) * salario, 0),
-        outras: Number(p.outrasReceitasMensal) || 0,
-        extra: 0
+        decimo: ovr('decimo', mesAno === 11 || mesAno === 12 ? salario / 2 : 0),
+        ferias: ovr('ferias', mesAno === 1 ? salario / 3 : 0),
+        bonus: ovr('bonus', bonusMult * salario),
+        outras: niv('outrasRec'),
+        extra: ovr('extra', 0)
       };
-      const fator = Math.pow(1 + (Number(p.gastoCrescimentoPct) || 0) / 100, k / 12);
-      const gas = {
-        rec: gasto0 * fator,
-        saz: p.gastosSazonais.filter((g) => Number(g.mesAno) === mesAno).reduce((a, g) => a + (Number(g.valor) || 0) * fator, 0)
-          + p.gastosPontuais.filter((g) => g.mes === m).reduce((a, g) => a + (Number(g.valor) || 0), 0)
-      };
+
+      // Gastos: seguem a inflação mês a mês e aceitam variação pontual ou valor digitado
+      const infl = niv('inflacao');
+      const gastoVar = evt('gastoVar');
+      const gasto = ovr('gasto', gastoAnt * (1 + taxaM(infl)) * (1 + gastoVar / 100));
+      gastoAnt = gasto;
+      const gas = { rec: gasto, saz: ovr('gastoPont', 0) };
       const receitas = Object.values(rec).reduce((a, b) => a + b, 0);
       const resultado = receitas - gas.rec - gas.saz;
 
-      const cambio = cambio0 * Math.pow(1 + (Number(p.cambioVariacaoPct) || 0) / 100, k / 12);
-      const aporte = salario * (Number(p.pctInvestir) || 0) / 100;
-      const ap = { rf: aporte * (Number(div.rf) || 0) / somaDiv, rv: aporte * (Number(div.rv) || 0) / somaDiv,
-        outros: aporte * (Number(div.outros) || 0) / somaDiv, bens: 0, caixa: 0 };
+      // Aportes
+      const pctInv = niv('pctInv');
+      const divs = { rf: niv('pctRf'), rv: niv('pctRv'), outros: niv('pctOut') };
+      const somaDiv = divs.rf + divs.rv + divs.outros || 1;
+      const aporteBase = salario * pctInv / 100;
+      const ap = {
+        rf: ovr('apRf', aporteBase * divs.rf / somaDiv),
+        rv: ovr('apRv', aporteBase * divs.rv / somaDiv),
+        outros: ovr('apOut', aporteBase * divs.outros / somaDiv),
+        bens: 0, caixa: 0
+      };
+      const aporte = ap.rf + ap.rv + ap.outros;
 
-      // Rendimento sobre o saldo do início do mês, com IR descontado
+      // Mercado
+      const cdi = niv('cdi');
+      const r = { caixa: taxaM(cdi * niv('caixaCdi') / 100), rf: taxaM(cdi * niv('rfCdi') / 100), rv: taxaM(niv('rvRet')), outros: taxaM(niv('outRet')) };
+      const cambio = ovr('cambio', cambioAnt * (1 + taxaM(niv('cambioVar'))));
+      const aliq = { caixa: niv('irCaixa') / 100, rf: niv('irRf') / 100, rv: niv('irRv') / 100, outros: niv('irOut') / 100 };
+      const caixaMin = niv('caixaMin');
+
       const rend = zeros();
       const ir = zeros();
       rend.caixa = Math.max(0, saldo.caixa) * r.caixa;
       rend.rf = saldo.rf * r.rf;
       rend.outros = saldo.outros * r.outros;
-      for (const cls of ['caixa', 'rf', 'outros']) ir[cls] = Math.max(0, rend[cls]) * aliq(cls);
+      for (const cls of ['caixa', 'rf', 'outros']) ir[cls] = Math.max(0, rend[cls]) * aliq[cls];
       const rvRendUSD = rvUSD * r.rv;
-      ir.rv = Math.max(0, rvRendUSD) * cambio * aliq('rv');
+      ir.rv = Math.max(0, rvRendUSD) * cambio * aliq.rv;
       const rvAntesBRL = rvUSD * cambioAnt;
       rvUSD += rvRendUSD - ir.rv / cambio + ap.rv / cambio;
-      rend.rv = rvUSD * cambio - rvAntesBRL - ap.rv + ir.rv;   // bruto, já com a variação do câmbio
+      rend.rv = rvUSD * cambio - rvAntesBRL - ap.rv + ir.rv;
 
       saldo.rf += rend.rf - ir.rf + ap.rf;
       saldo.outros += rend.outros - ir.outros + ap.outros;
       saldo.caixa += resultado - aporte + rend.caixa - ir.caixa;
       cambioAnt = cambio;
+      fatorInf *= 1 + taxaM(infl);
 
       regs.push({
-        mes: m, real: false, k, rec, gas, ap, rend, ir, outrosMov: 0, cambio,
+        mes: m, real: false, k, drv, rec, gas, ap, rend, ir, outrosMov: 0, cambio, fatorInf,
         saldo: { caixa: saldo.caixa, rf: saldo.rf, rv: rvUSD * cambio, outros: saldo.outros, bens: saldo.bens },
-        alerta: saldo.caixa < (Number(p.caixaMinimoMeses) || 0) * gas.rec
+        alerta: saldo.caixa < caixaMin * gas.rec
       });
     }
     return regs;
   }
 
-  // ---------- Tela ----------
-  async function carregarPremissas() {
+  // ---------- Carregar e salvar ----------
+  async function carregarPremissas(primeiroProj) {
     try {
       const row = await q(sb.from('premissas_projecao').select('dados').eq('id', 'principal').maybeSingle());
-      return { p: mesclar(PREMISSAS_PADRAO, row && row.dados), tabelaFalta: false };
+      const dados = row && row.dados;
+      return { p: migrarPremissas(dados, primeiroProj), tabelaFalta: false, migrado: !!(dados && dados.v !== 2) };
     } catch (err) {
-      return { p: mesclar(PREMISSAS_PADRAO, null), tabelaFalta: true, erro: err.message };
+      return { p: migrarPremissas(null, primeiroProj), tabelaFalta: true };
     }
   }
+  let tSalvar;
+  function agendarSalvar() {
+    const P = state.proj;
+    P.status = P.tabelaFalta ? 'sem-tabela' : 'pendente';
+    atualizarStatusProj();
+    if (P.tabelaFalta) return;
+    clearTimeout(tSalvar);
+    tSalvar = setTimeout(async () => {
+      P.status = 'salvando'; atualizarStatusProj();
+      try {
+        await q(sb.from('premissas_projecao').upsert({ id: 'principal', dados: P.p, atualizado_em: new Date().toISOString() }, { onConflict: 'id' }));
+        P.status = 'salvo';
+      } catch (err) { P.status = 'erro'; P.erroSalvar = err.message; }
+      atualizarStatusProj();
+    }, 1200);
+  }
+  function atualizarStatusProj() {
+    const el = document.getElementById('pj-status');
+    if (!el) return;
+    const P = state.proj;
+    el.className = 'pj-status ' + (P.status || '');
+    el.textContent = ({ pendente: 'alterações não salvas', salvando: 'salvando...', salvo: 'salvo',
+      erro: 'erro ao salvar: ' + (P.erroSalvar || ''), 'sem-tabela': 'não salva: falta a tabela no Supabase' })[P.status] || '';
+  }
 
+  // ---------- Formatação ----------
   const fmtInt = (v) => {
     const r = Math.round(Number(v) || 0);
     if (r === 0) return '–';
     const s = Math.abs(r).toLocaleString('pt-BR');
     return r < 0 ? `(${s})` : s;
   };
+  const fmtPct = (v) => (v == null || v === '' ? '' : Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 2 }));
+  const fmtCambio = (v) => (v == null ? '' : Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const lerNumero = (s) => {
+    const t = String(s).trim().replace(/\s|R\$|%/g, '').replace(/^\((.*)\)$/, '-$1');
+    if (t === '' || t === '–' || t === '-') return null;
+    const n = Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : (/^-?\d{1,3}(\.\d{3})+$/.test(t) ? t.replace(/\./g, '') : t));
+    return Number.isFinite(n) ? n : null;
+  };
 
+  // ---------- Tela ----------
   async function renderProjecao(body) {
     if (!state.proj) {
       body.innerHTML = '<div class="empty">Carregando histórico e premissas...</div>';
-      const [pr] = await Promise.all([carregarPremissas(), carregarHistorico()]);
-      const anoUlt = Number(mesesDisponiveis().slice(-1)[0].slice(0, 4));
-      state.proj = { ...pr, salvo: true, visao: 'ano', desde: String(anoUlt - 2), valores: 'nominal', fechados: new Set(), abertoPremissas: true };
+      await carregarHistorico();
+      const primeiroProj = addMeses(mesesDisponiveis().slice(-1)[0], 1);
+      const pr = await carregarPremissas(primeiroProj);
+      const anoUlt = mesesDisponiveis().slice(-1)[0].slice(0, 4);
+      state.proj = { ...pr, status: pr.tabelaFalta ? 'sem-tabela' : '', visao: 'mes', desde: anoUlt, valores: 'nominal', fechados: new Set(['rend']) };
+      if (pr.migrado) agendarSalvar();
     } else {
       await carregarHistorico();
     }
     const P = state.proj;
-
     body.innerHTML = `
-      ${P.tabelaFalta ? `<div class="aviso">A tabela <code>premissas_projecao</code> ainda não existe no Supabase, então as premissas funcionam mas não ficam salvas. Rode o SQL que acompanha esta versão e recarregue a página.</div>` : ''}
+      ${P.tabelaFalta ? `<div class="aviso">A tabela <code>premissas_projecao</code> ainda não existe no Supabase: as premissas funcionam, mas somem ao recarregar. Rode o SQL que acompanha o app e recarregue.</div>` : ''}
       <div id="proj-resumo"></div>
-      <div class="proj-layout">
-        <details class="proj-premissas" id="proj-premissas" ${P.abertoPremissas ? 'open' : ''}>
-          <summary><span>Premissas</span><span class="muted" id="proj-status"></span></summary>
-          <div id="proj-form"></div>
-        </details>
-        <div class="proj-saidas">
-          <div class="chart-card" id="proj-grafico"></div>
-          <div class="proj-controles" id="proj-controles"></div>
-          <div id="proj-tabela"></div>
-        </div>
-      </div>`;
-    document.getElementById('proj-premissas').addEventListener('toggle', (e) => { P.abertoPremissas = e.target.open; });
-    renderFormPremissas();
+      <div class="chart-card" id="proj-grafico"></div>
+      <div class="pj-barra" id="pj-barra"></div>
+      <div class="pj-celula" id="pj-celula"><span class="muted">Clique numa célula azul para editar uma premissa. Digite e aperte Enter ou Tab.</span></div>
+      <div id="proj-tabela"></div>`;
+    renderBarraProj();
     recalcularProjecao();
   }
 
-  let tRecalc;
-  function agendarRecalculo() {
-    state.proj.salvo = false;
-    atualizarStatus();
-    clearTimeout(tRecalc);
-    tRecalc = setTimeout(recalcularProjecao, 250);
-  }
-  function atualizarStatus() {
-    const el = document.getElementById('proj-status');
-    if (el) el.textContent = state.proj.salvo ? '' : 'alterações não salvas';
-  }
-
-  function recalcularProjecao() {
+  function recalcularProjecao(foco) {
     const P = state.proj;
     if (!document.getElementById('proj-tabela')) return;
     const real = calcularRealizado(cacheHist, P.p);
     const proj = projetar(real, P.p);
     P.ultimo = { real, proj };
     const todos = [...real.regs, ...proj];
-    const anoFim = proj[proj.length - 1].mes.slice(0, 4);
     const visiveis = todos.filter((r) => r.mes.slice(0, 4) >= P.desde);
-    const inf = Number(P.p.inflacaoPct) || 0;
-    const defl = (r) => (P.valores === 'hoje' && !r.real ? Math.pow(1 + inf / 100, r.k / 12) : 1);
-    renderResumo(real, proj, defl);
+    const defl = (r) => (P.valores === 'hoje' && !r.real ? r.fatorInf : 1);
+    renderResumo(real, proj);
     renderGraficoPatrimonio(visiveis, real.regs[real.regs.length - 1].mes, defl);
-    renderControlesProj(todos, anoFim);
-    renderTabelaProj(visiveis, defl);
-    // atualiza os valores automáticos mostrados nas premissas
-    document.querySelectorAll('[data-auto]').forEach((i) => {
-      const v = { salario: real.derivados.salario, gasto: real.derivados.gasto, cambio: real.derivados.cambio }[i.dataset.auto];
-      i.placeholder = v ? 'auto: ' + (i.dataset.auto === 'cambio' ? v.toFixed(2).replace('.', ',') : fmtInt(v)) : 'informe';
-    });
+    renderTabelaProj(visiveis, defl, real);
+    if (foco) {
+      const alvo = document.querySelector(`.pl input[data-linha="${foco.linha}"][data-mes="${foco.mes}"]`);
+      if (alvo) { alvo.focus({ preventScroll: true }); alvo.select(); }
+    }
   }
 
   const somaPat = (s) => s.caixa + s.rf + s.rv + s.outros;
 
-  function renderResumo(real, proj, defl) {
-    const P = state.proj;
+  function renderResumo(real, proj) {
     const hoje = real.regs[real.regs.length - 1];
     const fim = proj[proj.length - 1];
-    const inf = Number(P.p.inflacaoPct) || 0;
-    const fimHoje = somaPat(fim.saldo) / Math.pow(1 + inf / 100, fim.k / 12);
     const alerta = proj.find((r) => r.alerta);
     const aportado = proj.reduce((a, r) => a + r.ap.rf + r.ap.rv + r.ap.outros, 0);
     const rendLiq = proj.reduce((a, r) => a + ['caixa', ...INVEST].reduce((b, c) => b + r.rend[c] - r.ir[c], 0), 0);
@@ -1247,21 +1282,20 @@
           <div class="kpi-v num">${esc(fmt(somaPat(hoje.saldo)))}</div><div class="kpi-s muted">último mês realizado</div></div>
         <div class="kpi"><div class="kpi-l">Em ${esc(mesNome(fim.mes))}</div>
           <div class="kpi-v num">${esc(fmt(somaPat(fim.saldo)))}</div>
-          <div class="kpi-s muted">${esc(fmt(fimHoje))} em valores de hoje</div></div>
+          <div class="kpi-s muted">${esc(fmt(somaPat(fim.saldo) / fim.fatorInf))} em valores de hoje</div></div>
         <div class="kpi"><div class="kpi-l">Até lá, de onde vem</div>
           <div class="kpi-v num" style="font-size:18px">${esc(fmt(aportado))}</div>
           <div class="kpi-s muted">aportados, mais ${esc(fmt(rendLiq))} de rendimento líquido de IR</div></div>
-        <div class="kpi ${alerta ? 'kpi-alerta' : ''}"><div class="kpi-l">Caixa mínimo (${esc(String(P.p.caixaMinimoMeses))} meses de gastos)</div>
+        <div class="kpi ${alerta ? 'kpi-alerta' : ''}"><div class="kpi-l">Caixa x mínimo</div>
           <div class="kpi-v" style="font-size:18px">${alerta ? 'Abaixo em ' + esc(mesNome(alerta.mes)) : 'Sempre acima'}</div>
-          <div class="kpi-s muted">${alerta ? 'o aporte planejado consome o caixa' : 'no horizonte projetado'}</div></div>
+          <div class="kpi-s muted">${alerta ? 'os aportes consomem o caixa' : 'no horizonte projetado'}</div></div>
       </div>`;
-    void defl;
   }
 
   function renderGraficoPatrimonio(regs, mesUltimoReal, defl) {
     const el = document.getElementById('proj-grafico');
     if (!regs.length) { el.innerHTML = ''; return; }
-    const W = Math.max(320, (el.clientWidth || 800) - 34), H = 230, esq = 44, dir = 12, topo = 14, base = 24;
+    const W = Math.max(320, (el.clientWidth || 800) - 34), H = 210, esq = 44, dir = 12, topo = 14, base = 24;
     const n = regs.length;
     const x = (i) => esq + (n > 1 ? (i * (W - esq - dir)) / (n - 1) : 0);
     const pilhas = regs.map((r) => {
@@ -1273,6 +1307,8 @@
     const { topo: yMax, passo } = escalaBonita(maxV);
     const y = (v) => topo + (1 - v / yMax) * (H - topo - base);
     let svg = '';
+    const iUlt = regs.findIndex((r) => r.mes === mesUltimoReal);
+    if (iUlt >= 0 && iUlt < n - 1) svg += `<rect x="${x(iUlt)}" y="${topo}" width="${W - dir - x(iUlt)}" height="${H - topo - base}" class="proj-zona"/>`;
     for (let v = 0; v <= yMax + 0.001; v += passo) {
       svg += `<line x1="${esq}" x2="${W - dir}" y1="${y(v)}" y2="${y(v)}" class="grid"/>`;
       svg += `<text x="${esq - 6}" y="${y(v) + 4}" class="tick" text-anchor="end">${esc(emMil(v))}</text>`;
@@ -1285,9 +1321,7 @@
     const liquido = regs.map((r, i) => `${x(i).toFixed(1)},${y(Math.max(0, somaPat(r.saldo) / defl(r))).toFixed(1)}`);
     const temNegativo = regs.some((r) => r.saldo.caixa < 0);
     svg += `<path d="M${liquido.join('L')}" class="ln" style="stroke:var(--text);stroke-width:1.6"/>`;
-    const iUlt = regs.findIndex((r) => r.mes === mesUltimoReal);
     if (iUlt >= 0 && iUlt < n - 1) {
-      svg = `<rect x="${x(iUlt)}" y="${topo}" width="${W - dir - x(iUlt)}" height="${H - topo - base}" class="proj-zona"/>` + svg;
       svg += `<line x1="${x(iUlt)}" x2="${x(iUlt)}" y1="${topo - 4}" y2="${H - base}" class="guia"/>`;
       svg += `<text x="${x(iUlt) + 6}" y="${topo + 8}" class="tick">projetado →</text>`;
     }
@@ -1305,10 +1339,14 @@
         <span><i style="background:var(--text);height:2px;vertical-align:3px"></i>Patrimônio financeiro${temNegativo ? ' (já descontado o caixa negativo)' : ''}</span></div>`;
   }
 
-  function renderControlesProj(todos, anoFim) {
+  function renderBarraProj() {
     const P = state.proj;
-    const anos = [...new Set(todos.map((r) => r.mes.slice(0, 4)))].filter((a) => a <= anoFim);
-    const el = document.getElementById('proj-controles');
+    const ultimoReal = mesesDisponiveis().slice(-1)[0];
+    const primeiro = cacheHist.tx.length ? cacheHist.tx[0].data_competencia.slice(0, 4) : ultimoReal.slice(0, 4);
+    const fim = Number(ultimoReal.slice(0, 4)) + Math.round(Number(P.p.horizonteAnos) || 1);
+    const anos = [];
+    for (let a = Number(primeiro); a <= fim; a++) anos.push(String(a));
+    const el = document.getElementById('pj-barra');
     el.innerHTML = `
       <div class="seg seg-sm" role="radiogroup" aria-label="Agrupar por">
         ${[['mes', 'Mês'], ['tri', 'Trimestre'], ['ano', 'Ano']].map(([v, r]) => `<label><input type="radio" name="pj-visao" value="${v}" ${P.visao === v ? 'checked' : ''}><span>${r}</span></label>`).join('')}
@@ -1317,16 +1355,91 @@
         <label><input type="radio" name="pj-val" value="nominal" ${P.valores === 'nominal' ? 'checked' : ''}><span>Nominais</span></label>
         <label><input type="radio" name="pj-val" value="hoje" ${P.valores === 'hoje' ? 'checked' : ''}><span>De hoje</span></label>
       </div>
-      <label class="check">Desde <select id="pj-desde">${anos.map((a) => `<option ${a === P.desde ? 'selected' : ''}>${a}</option>`).join('')}</select></label>`;
+      <label class="check">Desde <select id="pj-desde">${anos.map((a) => `<option ${a === P.desde ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
+      <span class="spacer"></span>
+      <span class="pj-status" id="pj-status"></span>
+      <button type="button" class="btn ghost btn-sm" id="pj-config">Configurações</button>`;
     el.querySelectorAll('input[name="pj-visao"]').forEach((r) => r.onchange = (e) => { P.visao = e.target.value; recalcularProjecao(); });
     el.querySelectorAll('input[name="pj-val"]').forEach((r) => r.onchange = (e) => { P.valores = e.target.value; recalcularProjecao(); });
     el.querySelector('#pj-desde').onchange = (e) => { P.desde = e.target.value; recalcularProjecao(); };
+    el.querySelector('#pj-config').onclick = abrirConfigProj;
+    atualizarStatusProj();
   }
 
-  function renderTabelaProj(regs, defl) {
+  // ---------- Linhas do P&L ----------
+  // tipo: 'calc' (só leitura), 'ovr' (fórmula com valor digitável), 'evento' (só no mês), 'nivel' (vale até mudar)
+  // fmt: 'rs' | 'pct' | 'cambio' | 'mult' ; agg (trimestre/ano): 'soma' | 'fim' | 'comp' (variação composta)
+  function linhasPL() {
+    const receitas = (r) => Object.values(r.rec).reduce((a, b) => a + b, 0);
+    const gastos = (r) => r.gas.rec + r.gas.saz;
+    const aportado = (r) => r.ap.rf + r.ap.rv + r.ap.outros + r.ap.bens;
+    const rendCaixaLiq = (r) => (r.real ? r.rend.caixa : r.rend.caixa - r.ir.caixa);
+    const rendBruto = (r) => r.rend.caixa + r.rend.rf + r.rend.rv + r.rend.outros;
+    const irTot = (r) => r.ir.caixa + r.ir.rf + r.ir.rv + r.ir.outros;
+    const drv = (id) => (r) => r.drv[id];
+    const L = (id, nome, tipo, get, o = {}) => ({ id, nome, tipo, get, fmt: 'rs', agg: 'soma', ...o });
+    return [
+      { grupo: 'rec', nome: 'Receitas', linhas: [
+        L('sal', 'Salário', 'ovr', (r) => r.rec.salario),
+        L('salVar', 'Variação do salário no mês', 'evento', drv('salVar'), { fmt: 'pct', agg: 'comp', sub: true }),
+        L('decimo', '13º salário', 'ovr', (r) => r.rec.decimo),
+        L('ferias', 'Férias (terço)', 'ovr', (r) => r.rec.ferias),
+        L('bonusMult', 'Bônus ou PLR, em salários', 'evento', drv('bonusMult'), { fmt: 'mult', sub: true }),
+        L('bonus', 'Bônus e PLR', 'ovr', (r) => r.rec.bonus),
+        L('outrasRec', 'Outras receitas', 'nivel', (r) => r.rec.outras),
+        L('extra', 'Receitas extraordinárias', 'ovr', (r) => r.rec.extra)
+      ], total: ['Total de receitas', receitas] },
+      { grupo: 'gas', nome: 'Gastos', linhas: [
+        L('gasto', 'Gastos do dia a dia', 'ovr', (r) => r.gas.rec),
+        L('gastoVar', 'Variação dos gastos no mês, além da inflação', 'evento', drv('gastoVar'), { fmt: 'pct', agg: 'comp', sub: true }),
+        L('gastoPont', 'Gastos pontuais e sazonais', 'ovr', (r) => r.gas.saz)
+      ], total: ['Total de gastos', gastos] },
+      { destaque: ['Resultado', (r) => receitas(r) - gastos(r)] },
+      { grupo: 'dest', nome: 'Destino do resultado', linhas: [
+        L('pctInv', 'Parte do salário investida', 'nivel', drv('pctInv'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('apRf', 'Aporte em renda fixa', 'ovr', (r) => r.ap.rf),
+        L('pctRf', 'Para renda fixa, % do aporte', 'nivel', drv('pctRf'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('apRv', 'Aporte em renda variável', 'ovr', (r) => r.ap.rv),
+        L('pctRv', 'Para renda variável, % do aporte', 'nivel', drv('pctRv'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('apOut', 'Aporte em outros', 'ovr', (r) => r.ap.outros),
+        L('pctOut', 'Para outros, % do aporte', 'nivel', drv('pctOut'), { fmt: 'pct', agg: 'fim', sub: true }),
+        L('apBens', 'Aporte em imóvel e bens', 'calc', (r) => r.ap.bens),
+        L('rendCx', 'Rendimento líquido do caixa', 'calc', rendCaixaLiq),
+        L('outMov', 'Outros movimentos', 'calc', (r) => r.outrosMov)
+      ], total: ['Variação do caixa', (r) => receitas(r) - gastos(r) - aportado(r) + rendCaixaLiq(r) + r.outrosMov] },
+      { grupo: 'pat', nome: 'Patrimônio no fim do período', linhas: [
+        ...CLASSES.map((c) => L('sal_' + c.id, c.nome, 'calc', (r) => r.saldo[c.id], { agg: 'fim' })),
+        L('caixaMin', 'Caixa mínimo, em meses de gasto', 'nivel', drv('caixaMin'), { fmt: 'mult', agg: 'fim', sub: true })
+      ], total: ['Patrimônio financeiro', (r) => somaPat(r.saldo), 'fim'],
+      extra: [L('bens', 'Imóvel e bens', 'calc', (r) => r.saldo.bens, { agg: 'fim' }),
+        { ...L('patTot', 'Patrimônio total', 'calc', (r) => somaPat(r.saldo) + r.saldo.bens, { agg: 'fim' }), forte: true }] },
+      { grupo: 'rend', nome: 'Rendimentos e IR', linhas: [
+        L('rb', 'Rendimento bruto', 'calc', rendBruto),
+        L('irv', 'IR estimado*', 'calc', (r) => -irTot(r))
+      ], total: ['Rendimento líquido', (r) => rendBruto(r) - irTot(r)] },
+      { grupo: 'merc', nome: 'Premissas de mercado', linhas: [
+        L('cdi', 'CDI, % a.a.', 'nivel', drv('cdi'), { fmt: 'pct', agg: 'fim' }),
+        L('caixaCdi', 'Caixa rende, % do CDI', 'nivel', drv('caixaCdi'), { fmt: 'pct', agg: 'fim' }),
+        L('rfCdi', 'Renda fixa rende, % do CDI', 'nivel', drv('rfCdi'), { fmt: 'pct', agg: 'fim' }),
+        L('rvRet', 'Renda variável, % a.a. em dólar', 'nivel', drv('rvRet'), { fmt: 'pct', agg: 'fim' }),
+        L('outRet', 'Outros, % a.a.', 'nivel', drv('outRet'), { fmt: 'pct', agg: 'fim' }),
+        L('cambio', 'Dólar, R$', 'ovr', (r) => r.cambio, { fmt: 'cambio', agg: 'fim' }),
+        L('cambioVar', 'Variação do dólar, % a.a.', 'nivel', drv('cambioVar'), { fmt: 'pct', agg: 'fim' }),
+        L('inflacao', 'Inflação, % a.a.', 'nivel', drv('inflacao'), { fmt: 'pct', agg: 'fim' }),
+        L('irCaixa', 'IR do caixa, %', 'nivel', drv('irCaixa'), { fmt: 'pct', agg: 'fim' }),
+        L('irRf', 'IR da renda fixa, %', 'nivel', drv('irRf'), { fmt: 'pct', agg: 'fim' }),
+        L('irRv', 'IR da renda variável, %', 'nivel', drv('irRv'), { fmt: 'pct', agg: 'fim' }),
+        L('irOut', 'IR de outros, %', 'nivel', drv('irOut'), { fmt: 'pct', agg: 'fim' })
+      ] }
+    ];
+  }
+  const EDITAVEL = new Set(['ovr', 'evento', 'nivel']);
+
+  function renderTabelaProj(regs, defl, real) {
     const P = state.proj;
-    // Agrupa os meses nos períodos da visão escolhida
-    const chave = (m) => (P.visao === 'mes' ? m : P.visao === 'tri' ? m.slice(0, 4) + 'T' + Math.ceil(Number(m.slice(5, 7)) / 3) : m.slice(0, 4));
+    const p = P.p;
+    const porMes = P.visao === 'mes';
+    const chave = (m) => (porMes ? m : P.visao === 'tri' ? m.slice(0, 4) + 'T' + Math.ceil(Number(m.slice(5, 7)) / 3) : m.slice(0, 4));
     const periodos = [];
     for (const r of regs) {
       const c = chave(r.mes);
@@ -1334,83 +1447,73 @@
       if (!per || per.chave !== c) { per = { chave: c, regs: [] }; periodos.push(per); }
       per.regs.push(r);
     }
-    const rotulo = (per) => {
-      const c = per.chave;
-      if (P.visao === 'mes') return mesNome(c);
-      if (P.visao === 'tri') return c.slice(5) + 'T' + c.slice(2, 4);
-      return c;
-    };
+    const rotulo = (per) => (porMes ? mesNome(per.chave) : P.visao === 'tri' ? per.chave.slice(5) + 'T' + per.chave.slice(2, 4) : per.chave);
     const tipoPer = (per) => (per.regs.every((r) => r.real) ? 'real' : per.regs.some((r) => r.real) ? 'misto' : 'proj');
 
-    const fluxo = (f) => (per) => per.regs.reduce((a, r) => a + f(r) / defl(r), 0);
-    const estoque = (f) => (per) => { const r = per.regs[per.regs.length - 1]; return f(r) / defl(r); };
-    const receitas = (r) => Object.values(r.rec).reduce((a, b) => a + b, 0);
-    const gastos = (r) => r.gas.rec + r.gas.saz;
-    const aportado = (r) => r.ap.rf + r.ap.rv + r.ap.outros + r.ap.bens;
-    const rendCaixaLiq = (r) => (r.real ? r.rend.caixa : r.rend.caixa - r.ir.caixa);
-    const rendBruto = (r) => r.rend.caixa + r.rend.rf + r.rend.rv + r.rend.outros;
-    const irTot = (r) => r.ir.caixa + r.ir.rf + r.ir.rv + r.ir.outros;
+    // valor de uma linha num período (R$ divididos pelo deflator quando em valores de hoje)
+    const valor = (l, per) => {
+      const rs = l.fmt === 'rs';
+      const vals = per.regs.map((r) => { const v = l.get(r); return v == null ? null : (rs ? v / defl(r) : v); });
+      const ok = vals.filter((v) => v != null);
+      if (!ok.length) return null;
+      if (l.agg === 'fim') return ok[ok.length - 1];
+      if (l.agg === 'comp') return (ok.reduce((a, v) => a * (1 + v / 100), 1) - 1) * 100;
+      return ok.reduce((a, v) => a + v, 0);
+    };
+    const texto = (l, v) => {
+      if (v == null) return '';
+      if (l.fmt === 'pct') return Math.abs(v) < 1e-9 && l.tipo === 'evento' ? '' : fmtPct(v);
+      if (l.fmt === 'mult') return Math.abs(v) < 1e-9 && l.tipo === 'evento' ? '' : fmtPct(v);
+      if (l.fmt === 'cambio') return fmtCambio(v);
+      return fmtInt(v);
+    };
+    const explicito = (l, m) => celula(p, l.id, m) != null;
 
-    const grupos = [
-      { id: 'rec', nome: 'Receitas', linhas: [
-        ['Salário', fluxo((r) => r.rec.salario)],
-        ['13º e férias', fluxo((r) => r.rec.decimo + r.rec.ferias)],
-        ['Bônus e PLR', fluxo((r) => r.rec.bonus)],
-        ['Outras receitas', fluxo((r) => r.rec.outras)],
-        ['Receitas extraordinárias', fluxo((r) => r.rec.extra)]
-      ], total: ['Total de receitas', fluxo(receitas)] },
-      { id: 'gas', nome: 'Gastos', linhas: [
-        ['Gastos do dia a dia', fluxo((r) => r.gas.rec)],
-        ['Sazonais e pontuais', fluxo((r) => r.gas.saz)]
-      ], total: ['Total de gastos', fluxo(gastos)] },
-      { destaque: ['Resultado', fluxo((r) => receitas(r) - gastos(r))] },
-      { id: 'dest', nome: 'Destino do resultado', linhas: [
-        ['Aporte em renda fixa', fluxo((r) => r.ap.rf)],
-        ['Aporte em renda variável', fluxo((r) => r.ap.rv)],
-        ['Aporte em outros', fluxo((r) => r.ap.outros)],
-        ['Aporte em imóvel e bens', fluxo((r) => r.ap.bens)],
-        ['Rendimento líquido do caixa', fluxo(rendCaixaLiq)],
-        ['Outros movimentos', fluxo((r) => r.outrosMov)]
-      ], total: ['Variação do caixa', fluxo((r) => receitas(r) - gastos(r) - aportado(r) + rendCaixaLiq(r) + r.outrosMov)] },
-      { id: 'pat', nome: 'Patrimônio no fim do período', linhas: [
-        ...CLASSES.map((c) => [c.nome, estoque((r) => r.saldo[c.id])]),
-      ], total: ['Patrimônio financeiro', estoque((r) => somaPat(r.saldo))],
-      extra: [['Imóvel e bens', estoque((r) => r.saldo.bens)], ['Patrimônio total', estoque((r) => somaPat(r.saldo) + r.saldo.bens), true]] },
-      { id: 'rend', nome: 'Rendimentos', linhas: [
-        ['Rendimento bruto', fluxo(rendBruto)],
-        ['IR estimado*', fluxo((r) => -irTot(r))]
-      ], total: ['Rendimento líquido', fluxo((r) => rendBruto(r) - irTot(r))] }
-    ];
-
-    const celulas = (f, cls) => periodos.map((per) => {
-      const v = f(per);
-      return `<td class="num ${tipoPer(per)} ${cls || ''} ${v < -0.5 ? 'neg-v' : ''}">${esc(fmtInt(v))}</td>`;
+    const celulas = (l, cls) => periodos.map((per) => {
+      const t = tipoPer(per);
+      const v = valor(l, per);
+      const negativo = l.fmt === 'rs' && v != null && v < -0.5;
+      // Célula editável: visão mensal, mês projetado, linha de premissa
+      if (porMes && t === 'proj' && EDITAVEL.has(l.tipo)) {
+        const m = per.chave;
+        const set = explicito(l, m);
+        const herdado = l.tipo === 'nivel' && !set;
+        const val = l.fmt === 'rs' && P.valores === 'hoje' ? per.regs[0] && l.get(per.regs[0]) : v; // edita sempre em valor nominal
+        const mostra = l.fmt === 'rs' ? (val ? Math.round(val).toLocaleString('pt-BR') : '') : texto(l, val);
+        return `<td class="proj ed ${set ? 'set' : ''} ${herdado ? 'herd' : ''} ${l.tipo}"><input type="text" inputmode="decimal"
+          data-linha="${l.id}" data-mes="${m}" value="${esc(mostra)}" aria-label="${esc(l.nome)}, ${esc(mesNome(m))}"></td>`;
+      }
+      return `<td class="num ${t} ${cls || ''} ${negativo ? 'neg-v' : ''} ${l.sub ? 'drv' : ''}">${esc(l.fmt === 'rs' ? (v == null ? '' : fmtInt(v)) : texto(l, v))}</td>`;
     }).join('');
-    const alertaCel = periodos.map((per) => `<td class="${tipoPer(per)}">${per.regs.some((r) => r.alerta) ? '<span class="tag-alerta" title="Caixa abaixo do mínimo">abaixo do mínimo</span>' : ''}</td>`).join('');
-    const vazia = (f) => periodos.every((per) => Math.abs(f(per)) < 0.5);
+    const vazia = (l) => !EDITAVEL.has(l.tipo) && periodos.every((per) => { const v = valor(l, per); return v == null || Math.abs(v) < 0.5; });
 
-    let linhasHtml = '';
-    for (const g of grupos) {
+    let html = '';
+    for (const g of linhasPL()) {
       if (g.destaque) {
-        linhasHtml += `<tr class="t-destaque"><th scope="row">${esc(g.destaque[0])}</th>${celulas(g.destaque[1])}</tr>`;
+        const l = { fmt: 'rs', agg: 'soma', get: g.destaque[1] };
+        html += `<tr class="t-destaque"><th scope="row">${esc(g.destaque[0])}</th>${celulas(l)}</tr>`;
         continue;
       }
-      const fechado = P.fechados.has(g.id);
-      linhasHtml += `<tr class="t-grupo"><th scope="row">
-        <button type="button" class="grupo-btn" data-grupo="${g.id}" aria-expanded="${!fechado}">${fechado ? '▸' : '▾'} ${esc(g.nome)}</button></th><td colspan="${periodos.length}"></td></tr>`;
+      const fechado = P.fechados.has(g.grupo);
+      html += `<tr class="t-grupo"><th scope="row"><button type="button" class="grupo-btn" data-grupo="${g.grupo}" aria-expanded="${!fechado}">${fechado ? '▸' : '▾'} ${esc(g.nome)}</button></th><td colspan="${periodos.length}"></td></tr>`;
       if (!fechado) {
-        for (const [nome, f] of g.linhas) {
-          if (vazia(f)) continue;
-          linhasHtml += `<tr><th scope="row" class="t-linha">${esc(nome)}</th>${celulas(f)}</tr>`;
+        for (const l of g.linhas) {
+          if (vazia(l)) continue;
+          const ed = EDITAVEL.has(l.tipo);
+          html += `<tr class="${l.sub ? 't-drv' : ''} ${ed ? 't-ed' : ''}"><th scope="row" class="t-linha ${l.sub ? 't-sub' : ''}" title="${esc(dicaLinha(l))}">${esc(l.nome)}</th>${celulas(l)}</tr>`;
         }
       }
-      linhasHtml += `<tr class="t-total"><th scope="row">${esc(g.total[0])}</th>${celulas(g.total[1])}</tr>`;
-      if (g.id === 'dest' && periodos.some((per) => per.regs.some((r) => r.alerta))) {
-        linhasHtml += `<tr class="t-alerta"><th scope="row" class="t-linha muted">Caixa x mínimo</th>${alertaCel}</tr>`;
+      if (g.total) {
+        const l = { fmt: 'rs', agg: g.total[2] || 'soma', get: g.total[1] };
+        html += `<tr class="t-total"><th scope="row">${esc(g.total[0])}</th>${celulas(l)}</tr>`;
       }
-      if (g.extra) for (const [nome, f, forte] of g.extra) {
-        if (!forte && vazia(f)) continue;
-        linhasHtml += `<tr class="${forte ? 't-total' : ''}"><th scope="row" class="${forte ? '' : 't-linha'}">${esc(nome)}</th>${celulas(f)}</tr>`;
+      if (g.grupo === 'dest' && periodos.some((per) => per.regs.some((r) => r.alerta))) {
+        html += `<tr class="t-alerta"><th scope="row" class="t-linha muted">Caixa x mínimo</th>${periodos.map((per) =>
+          `<td class="${tipoPer(per)}">${per.regs.some((r) => r.alerta) ? '<span class="tag-alerta">abaixo</span>' : ''}</td>`).join('')}</tr>`;
+      }
+      if (g.extra) for (const l of g.extra) {
+        if (!l.forte && vazia(l)) continue;
+        html += `<tr class="${l.forte ? 't-total' : ''}"><th scope="row" class="${l.forte ? '' : 't-linha'}">${esc(l.nome)}</th>${celulas(l)}</tr>`;
       }
     }
 
@@ -1420,186 +1523,188 @@
     }).join('');
 
     const el = document.getElementById('proj-tabela');
+    const wrapAnt = el.querySelector('.pl-wrap');
+    const rolagem = wrapAnt ? { x: wrapAnt.scrollLeft, y: wrapAnt.scrollTop } : null;
     el.innerHTML = `
-      <div class="pl-wrap"><table class="pl">
+      <div class="pl-wrap"><table class="pl ${porMes ? 'pl-mes' : ''}">
         <thead><tr><th scope="col" class="pl-canto">R$ ${P.valores === 'hoje' ? '(valores de hoje)' : ''}</th>${cab}</tr></thead>
-        <tbody>${linhasHtml}</tbody>
+        <tbody>${html}</tbody>
       </table></div>
-      <p class="muted pl-nota">* No realizado, o IR é só uma estimativa com as mesmas alíquotas: os saldos continuam brutos. No projetado, ele é descontado do patrimônio.
-      "Outros movimentos" concilia o caixa realizado com o que não é receita, gasto nem aporte (repasses, saldos iniciais, dinheiro em trânsito).</p>`;
+      <p class="muted pl-nota">${porMes ? 'Células azuis são premissas: <b>negrito</b> é valor digitado; cinza é valor herdado do mês anterior ou da fórmula. Apagar o conteúdo volta para o padrão.'
+        : 'Para editar premissas, use a visão Mês. Aqui os percentuais mostram o valor no fim do período; as variações aparecem acumuladas.'}
+      ${P.valores === 'hoje' && porMes ? ' Com "De hoje" ligado, as células editáveis continuam em valores nominais.' : ''}<br>
+      * No realizado, o IR é só estimativa: os saldos continuam brutos. "Outros movimentos" concilia o caixa realizado com repasses, saldos iniciais e dinheiro em trânsito.</p>`;
+    const wrap = el.querySelector('.pl-wrap');
+    if (rolagem) { wrap.scrollLeft = rolagem.x; }
+    else {
+      const primeiroProj = el.querySelector('thead th.proj, thead th.misto');
+      if (primeiroProj) {
+        const rotuloW = el.querySelector('thead th.pl-canto').offsetWidth;
+        wrap.scrollLeft = Math.max(0, primeiroProj.offsetLeft - rotuloW - 2 * primeiroProj.offsetWidth);
+      }
+    }
     el.querySelectorAll('[data-grupo]').forEach((b) => b.onclick = () => {
       const id = b.dataset.grupo;
       if (P.fechados.has(id)) P.fechados.delete(id); else P.fechados.add(id);
       recalcularProjecao();
     });
-    const wrap = el.querySelector('.pl-wrap');
-    const primeiroProj = el.querySelector('thead th.proj, thead th.misto');
-    if (primeiroProj) {
-      // Deixa visíveis os dois últimos períodos realizados antes do primeiro projetado
-      const rotuloW = el.querySelector('thead th.pl-canto').offsetWidth;
-      wrap.scrollLeft = Math.max(0, primeiroProj.offsetLeft - rotuloW - 2 * primeiroProj.offsetWidth);
-    }
+    const barraCel = document.getElementById('pj-celula');
+    if (barraCel) barraCel.hidden = !porMes;
+    ligarCelulas(el);
+    void real;
   }
 
-  // ---------- Formulário de premissas ----------
-  function renderFormPremissas() {
+  function dicaLinha(l) {
+    return ({
+      ovr: 'Calculado pela fórmula; digite um valor num mês para substituir.',
+      evento: 'Vale só no mês em que for digitado.',
+      nivel: 'Vale a partir do mês digitado até ser trocado.',
+      calc: 'Calculado.'
+    })[l.tipo] || '';
+  }
+
+  // ---------- Edição das células ----------
+  function linhaPorId(id) {
+    for (const g of linhasPL()) for (const l of [...(g.linhas || []), ...(g.extra || [])]) if (l.id === id) return l;
+    return null;
+  }
+  function gravarCelula(id, m, v) {
+    const p = state.proj.p;
+    if (v == null) { if (p.celulas[id]) delete p.celulas[id][m]; }
+    else (p.celulas[id] = p.celulas[id] || {})[m] = v;
+    if (p.celulas[id] && !Object.keys(p.celulas[id]).length) delete p.celulas[id];
+  }
+  function mesesProjetados() {
+    const ult = mesesDisponiveis().slice(-1)[0];
+    const n = Math.round(Number(state.proj.p.horizonteAnos) || 1) * 12;
+    const out = [];
+    for (let k = 1; k <= n; k++) out.push(addMeses(ult, k));
+    return out;
+  }
+
+  function ligarCelulas(el) {
+    const barra = document.getElementById('pj-celula');
+    const inputs = el.querySelectorAll('.pl input[data-linha]');
+    inputs.forEach((inp) => {
+      inp.addEventListener('focus', () => { inp.select(); mostrarBarraCelula(barra, inp.dataset.linha, inp.dataset.mes); });
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); moverFoco(inp, e.shiftKey ? -1 : 1); inp.blur(); }
+        else if (e.key === 'Escape') { inp.value = inp.defaultValue; inp.blur(); }
+      });
+      inp.addEventListener('change', () => {
+        const v = lerNumero(inp.value);
+        if (inp.value.trim() !== '' && v == null) { inp.value = inp.defaultValue; toast('Número inválido'); return; }
+        gravarCelula(inp.dataset.linha, inp.dataset.mes, v);
+        agendarSalvar();
+        // espera o foco ir para a próxima célula e redesenha mantendo esse foco
+        setTimeout(() => {
+          const a = document.activeElement;
+          const foco = a && a.dataset && a.dataset.linha ? { linha: a.dataset.linha, mes: a.dataset.mes } : proximoFoco;
+          proximoFoco = null;
+          recalcularProjecao(foco);
+        }, 0);
+      });
+    });
+  }
+  let proximoFoco = null;
+  function moverFoco(inp, passo) {
+    const linha = inp.dataset.linha;
+    const lista = [...document.querySelectorAll(`.pl input[data-linha="${linha}"]`)];
+    const i = lista.indexOf(inp);
+    const alvo = lista[i + passo];
+    proximoFoco = alvo ? { linha, mes: alvo.dataset.mes } : null;
+    if (alvo) alvo.focus();
+  }
+
+  function mostrarBarraCelula(barra, id, m) {
+    const l = linhaPorId(id);
+    if (!l) return;
+    const p = state.proj.p;
+    const tem = celula(p, id, m) != null;
+    const tipoTexto = { ovr: 'fórmula com valor digitável', evento: 'vale só neste mês', nivel: 'vale deste mês em diante, até mudar' }[l.tipo];
+    barra.innerHTML = `
+      <span><b>${esc(l.nome)}</b> · ${esc(mesLongo(m))} <span class="muted">(${esc(tipoTexto)})</span></span>
+      <span class="spacer"></span>
+      ${l.tipo !== 'nivel' ? '<button type="button" class="link" data-acao="anual">Repetir este valor todo ano neste mês</button>' : ''}
+      ${l.tipo === 'evento' || l.tipo === 'ovr' ? '<button type="button" class="link" data-acao="todos">Repetir em todos os meses seguintes</button>' : ''}
+      ${tem ? '<button type="button" class="link" data-acao="limpar">Voltar ao padrão</button>' : ''}
+      ${p.celulas[id] ? '<button type="button" class="link" data-acao="limparLinha">Limpar a linha</button>' : ''}`;
+    barra.querySelectorAll('[data-acao]').forEach((b) => b.addEventListener('mousedown', (e) => e.preventDefault()));
+    barra.querySelectorAll('[data-acao]').forEach((b) => b.onclick = () => {
+      const inp = document.querySelector(`.pl input[data-linha="${id}"][data-mes="${m}"]`);
+      let v = inp ? lerNumero(inp.value) : celula(p, id, m);
+      if (v == null) v = celula(p, id, m);
+      const acao = b.dataset.acao;
+      if (acao === 'limpar') gravarCelula(id, m, null);
+      else if (acao === 'limparLinha') delete p.celulas[id];
+      else if (v != null) {
+        gravarCelula(id, m, v);
+        for (const mm of mesesProjetados()) {
+          if (mm <= m) continue;
+          if (acao === 'todos' || (acao === 'anual' && mm.slice(5, 7) === m.slice(5, 7))) gravarCelula(id, mm, v);
+        }
+      }
+      agendarSalvar();
+      recalcularProjecao({ linha: id, mes: m });
+      mostrarBarraCelula(barra, id, m);
+    });
+  }
+
+  // ---------- Configurações (o que não é célula) ----------
+  function abrirConfigProj() {
     const P = state.proj;
     const p = P.p;
-    const real = calcularRealizado(cacheHist, p);
-    const ultimoMes = real.regs[real.regs.length - 1].mes;
-    const mesesProj = [];
-    for (let k = 1; k <= Math.round(Number(p.horizonteAnos) || 1) * 12; k++) mesesProj.push(addMeses(ultimoMes, k));
-    const optMes = (sel) => mesesProj.map((m) => `<option value="${m}" ${m === sel ? 'selected' : ''}>${esc(mesNome(m))}</option>`).join('');
-    const optMesAno = (sel, comZero) => (comZero ? '<option value="0">não considerar</option>' : '')
-      + NOMES_MES.map((nm, i) => `<option value="${i + 1}" ${Number(sel) === i + 1 ? 'selected' : ''}>${nm}</option>`).join('');
-
-    const num = (cam, rotulo, sufixo, extra) => `
-      <label class="pm"><span>${esc(rotulo)}</span>
-        <span class="pm-in"><input type="text" inputmode="decimal" data-cam="${cam}" value="${esc(valorCampo(lerCaminho(p, cam)))}" ${extra || ''}>${sufixo ? `<i>${esc(sufixo)}</i>` : ''}</span></label>`;
-    const lista = (id, titulo, itens, linha, novo) => `
-      <div class="pm-lista" data-lista="${id}">
-        <div class="pm-lista-h"><span>${esc(titulo)}</span><button type="button" class="link" data-add="${id}">+ adicionar</button></div>
-        ${itens.length ? itens.map((it, i) => `<div class="pm-item" data-i="${i}">${linha(it, i)}<button type="button" class="pm-x" data-del="${id}" data-i="${i}" aria-label="Remover">×</button></div>`).join('') : '<div class="muted pm-vazio">Nenhum.</div>'}
-      </div>`;
-    void novo;
-
     const catsEntrada = state.categorias.filter((k) => k.tipo === 'entrada' && !k.interna).sort((a, b) => a.nome.localeCompare(b.nome));
     const salSel = new Set(p.salarioCats || catsEntrada.filter((k) => /sal[aá]rio/i.test(k.nome)).map((k) => k.id));
     const contasOrd = state.contas.slice().sort((a, b) => (b.ativo - a.ativo) || a.nome.localeCompare(b.nome));
-
-    document.getElementById('proj-form').innerHTML = `
-      <div class="pm-acoes">
-        <button type="button" class="btn" id="pm-salvar">Salvar premissas</button>
-        <button type="button" class="btn ghost" id="pm-padrao">Restaurar padrão</button>
-      </div>
-
-      <fieldset><legend>Receitas</legend>
-        ${num('salarioBase', 'Salário líquido de partida', 'R$', 'data-auto="salario"')}
-        ${num('reajusteAnualPct', 'Reajuste anual', '%')}
-        <label class="pm"><span>Mês do reajuste anual</span><select data-cam="reajusteAnualMes" data-tipo="int">${optMesAno(p.reajusteAnualMes)}</select></label>
-        ${lista('reajustesPontuais', 'Reajustes pontuais (ex.: promoção)', p.reajustesPontuais, (it, i) => `
-          <select data-item="reajustesPontuais.${i}.mes">${optMes(it.mes)}</select>
-          <span class="pm-in"><input type="text" inputmode="decimal" data-item="reajustesPontuais.${i}.pct" value="${esc(valorCampo(it.pct))}"><i>%</i></span>`)}
-        <label class="pm pm-check"><input type="checkbox" data-cam="decimoTerceiro" ${p.decimoTerceiro ? 'checked' : ''}><span>13º salário (metade em nov, metade em dez)</span></label>
-        <label class="pm"><span>Mês do terço de férias</span><select data-cam="feriasMes" data-tipo="int">${optMesAno(p.feriasMes, true)}</select></label>
-        ${lista('bonus', 'Bônus ou PLR (todo ano)', p.bonus, (it, i) => `
-          <select data-item="bonus.${i}.mesAno" data-tipo="int">${optMesAno(it.mesAno)}</select>
-          <span class="pm-in"><input type="text" inputmode="decimal" data-item="bonus.${i}.multiplo" value="${esc(valorCampo(it.multiplo))}"><i>salários</i></span>`)}
-        ${num('outrasReceitasMensal', 'Outras receitas por mês', 'R$')}
-        <details class="pm-sub"><summary>Categorias que contam como salário</summary>
-          ${catsEntrada.map((k) => `<label class="pm-check"><input type="checkbox" data-salcat="${k.id}" ${salSel.has(k.id) ? 'checked' : ''}> ${esc(k.nome)}</label>`).join('')}
-        </details>
-      </fieldset>
-
-      <fieldset><legend>Gastos</legend>
-        ${num('gastoBase', 'Gasto mensal de partida', 'R$', 'data-auto="gasto"')}
-        ${num('gastoCrescimentoPct', 'Aumento dos gastos por ano', '%')}
-        ${lista('gastosSazonais', 'Sazonais (todo ano: IPVA, IPTU, seguro...)', p.gastosSazonais, (it, i) => `
-          <select data-item="gastosSazonais.${i}.mesAno" data-tipo="int">${optMesAno(it.mesAno)}</select>
-          <span class="pm-in"><input type="text" inputmode="decimal" data-item="gastosSazonais.${i}.valor" value="${esc(valorCampo(it.valor))}"><i>R$</i></span>
-          <input type="text" class="pm-desc" placeholder="descrição" data-item="gastosSazonais.${i}.desc" data-tipo="txt" value="${esc(it.desc || '')}">`)}
-        ${lista('gastosPontuais', 'Pontuais (viagem, compra grande...)', p.gastosPontuais, (it, i) => `
-          <select data-item="gastosPontuais.${i}.mes">${optMes(it.mes)}</select>
-          <span class="pm-in"><input type="text" inputmode="decimal" data-item="gastosPontuais.${i}.valor" value="${esc(valorCampo(it.valor))}"><i>R$</i></span>
-          <input type="text" class="pm-desc" placeholder="descrição" data-item="gastosPontuais.${i}.desc" data-tipo="txt" value="${esc(it.desc || '')}">`)}
-        <p class="pm-dica muted">O gasto de partida é a média dos últimos 12 meses, que já inclui os sazonais que aconteceram. Se cadastrar sazonais, reduza o gasto de partida para não contar duas vezes.</p>
-      </fieldset>
-
-      <fieldset><legend>Investimento</legend>
-        ${num('pctInvestir', 'Parte do salário investida', '%')}
-        ${num('divisao.rf', 'Para renda fixa', '% do aporte')}
-        ${num('divisao.rv', 'Para renda variável', '% do aporte')}
-        ${num('divisao.outros', 'Para outros', '% do aporte')}
-        ${num('caixaMinimoMeses', 'Caixa mínimo', 'meses de gasto')}
-        <p class="pm-dica muted">13º, férias, bônus e o que sobrar além do aporte vão para o caixa. Se faltar, sai do caixa.</p>
-      </fieldset>
-
-      <fieldset><legend>Retornos e economia</legend>
-        ${num('cdiPct', 'CDI', '% a.a.')}
-        ${num('caixaPctCdi', 'Caixa rende', '% do CDI')}
-        ${num('rfPctCdi', 'Renda fixa rende', '% do CDI')}
-        ${num('rvRetornoPct', 'Renda variável (em dólar)', '% a.a.')}
-        ${num('outrosRetornoPct', 'Outros', '% a.a.')}
-        ${num('cambioInicial', 'Dólar de partida', 'R$', 'data-auto="cambio"')}
-        ${num('cambioVariacaoPct', 'Variação do dólar', '% a.a.')}
-        ${num('inflacaoPct', 'Inflação', '% a.a.')}
-        ${num('horizonteAnos', 'Horizonte', 'anos')}
-      </fieldset>
-
-      <fieldset><legend>IR médio sobre o rendimento</legend>
-        ${num('ir.caixa', 'Caixa', '%')}
-        ${num('ir.rf', 'Renda fixa', '%')}
-        ${num('ir.rv', 'Renda variável', '%')}
-        ${num('ir.outros', 'Outros', '%')}
-      </fieldset>
-
-      <fieldset><legend>Contas por classe</legend>
-        ${contasOrd.map((c) => `<label class="pm"><span class="${c.ativo ? '' : 'muted'}">${esc(c.nome)}${c.moeda !== 'BRL' ? ` (${esc(c.moeda)})` : ''}</span>
-          <select data-classe="${c.id}">${CLASSES_CONTA.map((k) => `<option value="${k.id}" ${classeDe(c, p) === k.id ? 'selected' : ''}>${esc(k.nome)}</option>`).join('')}</select></label>`).join('')}
-      </fieldset>`;
-
-    const form = document.getElementById('proj-form');
-    const lerNum = (s) => {
-      const t = String(s).trim().replace(/\s|R\$|%/g, '');
-      if (t === '') return null;
-      const n = Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : (/^\d{1,3}(\.\d{3})+$/.test(t) ? t.replace(/\./g, '') : t));
-      return Number.isFinite(n) ? n : null;
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    back.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cfg-t" style="max-width:600px">
+        <header><h2 id="cfg-t">Configurações da projeção</h2><button class="close" type="button" aria-label="Fechar">×</button></header>
+        <div class="cfg">
+          <label class="pm"><span>Horizonte da projeção</span><span class="pm-in"><input id="cfg-h" type="text" inputmode="numeric" value="${esc(String(p.horizonteAnos))}"><i>anos</i></span></label>
+          <h3>Categorias que contam como salário</h3>
+          <div class="cfg-grid">${catsEntrada.map((k) => `<label class="pm-check"><input type="checkbox" data-salcat="${k.id}" ${salSel.has(k.id) ? 'checked' : ''}> ${esc(k.nome)}</label>`).join('')}</div>
+          <h3>Contas por classe</h3>
+          <div class="cfg-contas">${contasOrd.map((c) => `<label class="pm"><span class="${c.ativo ? '' : 'muted'}">${esc(c.nome)}${c.moeda !== 'BRL' ? ` (${esc(c.moeda)})` : ''}</span>
+            <select data-classe="${c.id}">${CLASSES_CONTA.map((k) => `<option value="${k.id}" ${classeDe(c, p) === k.id ? 'selected' : ''}>${esc(k.nome)}</option>`).join('')}</select></label>`).join('')}</div>
+          <h3>Valores de partida das premissas</h3>
+          <p class="muted" style="margin:0 0 6px;font-size:13px">Valem até você digitar outro valor numa célula. Salário, gasto e dólar partem do realizado (média dos últimos 3 meses, média dos últimos 12 meses e última cotação).</p>
+          <div class="cfg-grid">${Object.keys(NIVEIS_PADRAO).map((id) => {
+            const l = linhaPorId(id);
+            return l ? `<label class="pm"><span>${esc(l.nome)}</span><span class="pm-in"><input type="text" inputmode="decimal" data-nivel="${id}" value="${esc(fmtPct(p.niveis[id]))}"></span></label>` : '';
+          }).join('')}</div>
+          <div class="actions">
+            <button type="button" class="btn danger" id="cfg-zerar">Apagar todas as premissas digitadas</button>
+            <span class="spacer"></span>
+            <button type="button" class="btn" id="cfg-ok">Aplicar</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(back);
+    const fechar = () => back.remove();
+    back.querySelector('.close').onclick = fechar;
+    back.addEventListener('click', (e) => { if (e.target === back) fechar(); });
+    back.addEventListener('keydown', (e) => { if (e.key === 'Escape') fechar(); });
+    back.querySelector('#cfg-zerar').onclick = () => {
+      if (!confirm('Apagar todas as células digitadas? Os valores de partida continuam.')) return;
+      p.celulas = {};
+      fechar(); agendarSalvar(); recalcularProjecao();
     };
-    const auto = new Set(['salarioBase', 'gastoBase', 'cambioInicial']);
-    form.querySelectorAll('[data-cam]').forEach((inp) => inp.addEventListener(inp.type === 'checkbox' || inp.tagName === 'SELECT' ? 'change' : 'input', () => {
-      const cam = inp.dataset.cam;
-      let v;
-      if (inp.type === 'checkbox') v = inp.checked;
-      else if (inp.dataset.tipo === 'int') v = Number(inp.value);
-      else { v = lerNum(inp.value); if (v == null && !auto.has(cam)) v = 0; }
-      gravarCaminho(p, cam, v);
-      agendarRecalculo();
-    }));
-    form.querySelectorAll('[data-item]').forEach((inp) => inp.addEventListener(inp.tagName === 'SELECT' ? 'change' : 'input', () => {
-      const [lst, i, campo] = inp.dataset.item.split('.');
-      const v = inp.dataset.tipo === 'txt' ? inp.value : inp.dataset.tipo === 'int' ? Number(inp.value)
-        : inp.tagName === 'SELECT' ? inp.value : (lerNum(inp.value) || 0);
-      p[lst][Number(i)][campo] = v;
-      agendarRecalculo();
-    }));
-    const novos = {
-      reajustesPontuais: () => ({ mes: mesesProj[12] || mesesProj[0], pct: 10 }),
-      bonus: () => ({ mesAno: 3, multiplo: 1 }),
-      gastosSazonais: () => ({ mesAno: 1, valor: 0, desc: '' }),
-      gastosPontuais: () => ({ mes: mesesProj[6] || mesesProj[0], valor: 0, desc: '' })
+    back.querySelector('#cfg-ok').onclick = () => {
+      const h = Math.round(lerNumero(back.querySelector('#cfg-h').value) || 0);
+      if (h >= 1 && h <= 50) p.horizonteAnos = h;
+      const marcadas = [...back.querySelectorAll('[data-salcat]:checked')].map((x) => x.dataset.salcat);
+      p.salarioCats = marcadas;
+      back.querySelectorAll('[data-classe]').forEach((s) => {
+        const c = conta(s.dataset.classe);
+        if (s.value === classePadrao(c)) delete p.classes[c.id]; else p.classes[c.id] = s.value;
+      });
+      back.querySelectorAll('[data-nivel]').forEach((i) => { const v = lerNumero(i.value); if (v != null) p.niveis[i.dataset.nivel] = v; });
+      fechar(); agendarSalvar(); renderBarraProj(); recalcularProjecao();
     };
-    form.querySelectorAll('[data-add]').forEach((b) => b.onclick = () => { p[b.dataset.add].push(novos[b.dataset.add]()); renderFormPremissas(); agendarRecalculo(); });
-    form.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { p[b.dataset.del].splice(Number(b.dataset.i), 1); renderFormPremissas(); agendarRecalculo(); });
-    form.querySelectorAll('[data-salcat]').forEach((cb) => cb.onchange = () => {
-      p.salarioCats = [...form.querySelectorAll('[data-salcat]:checked')].map((x) => x.dataset.salcat);
-      agendarRecalculo();
-    });
-    form.querySelectorAll('[data-classe]').forEach((s) => s.onchange = () => {
-      const c = conta(s.dataset.classe);
-      if (s.value === classePadrao(c)) delete p.classes[c.id]; else p.classes[c.id] = s.value;
-      agendarRecalculo();
-    });
-    document.getElementById('pm-padrao').onclick = () => {
-      if (!confirm('Voltar todas as premissas para o padrão? As alterações não salvas serão perdidas.')) return;
-      P.p = mesclar(PREMISSAS_PADRAO, null);
-      renderFormPremissas();
-      agendarRecalculo();
-    };
-    document.getElementById('pm-salvar').onclick = async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      try {
-        await q(sb.from('premissas_projecao').upsert({ id: 'principal', dados: P.p, atualizado_em: new Date().toISOString() }, { onConflict: 'id' }));
-        P.salvo = true; P.tabelaFalta = false;
-        atualizarStatus();
-        toast('Premissas salvas');
-      } catch (err) {
-        toast('Não foi possível salvar: ' + err.message);
-      } finally { btn.disabled = false; }
-    };
-    atualizarStatus();
   }
-  const valorCampo = (v) => (v == null ? '' : String(v).replace('.', ','));
 
   // ---------- Formulário de lançamento ----------
   // Transferências: os dois lados ficam ligados por transferencia_par_id (cada um aponta para o outro),
@@ -1817,6 +1922,7 @@
     tResize = setTimeout(() => {
       const el = document.getElementById('g-gastos');
       if (el && state.graf && state.graf.gastos && state.graf.gastos.modo === 'linhas') montarGrafico(el, 'gastos');
+      if (document.getElementById('proj-grafico') && state.proj && state.proj.ultimo) recalcularProjecao();
     }, 200);
   });
 

@@ -368,3 +368,48 @@ tr.closed td { color: var(--muted); }
   .pl tbody th { min-width: 150px; max-width: 170px; white-space: normal; }
   .kpi-v { font-size: 18px; }
 }
+
+/* ---------- Barra lateral recolhível ---------- */
+.menu-btn { display: inline-block; color: var(--muted); }
+.menu-btn:hover { color: var(--text); background: var(--soft); }
+@media (min-width: 761px) {
+  .shell.side-oculta { grid-template-columns: 1fr; }
+  .shell.side-oculta .sidebar { display: none; }
+}
+
+/* ---------- Projeção: premissas nas células ---------- */
+.pj-barra { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0 8px; }
+.pj-barra select { padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--bg); }
+.spacer { flex: 1; }
+.btn-sm { padding: 5px 12px; font-size: 13.5px; }
+.pj-status { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.pj-status.pendente, .pj-status.sem-tabela { color: #B8663D; }
+.pj-status.erro { color: var(--neg); }
+.pj-status.salvo { color: var(--pos); }
+.pj-celula { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; min-height: 36px; padding: 7px 12px; margin-bottom: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--soft); font-size: 13.5px; }
+.pj-celula .link { font-size: 13px; }
+.pl tbody th { white-space: normal; max-width: 270px; }
+.pl-mes th, .pl-mes td { padding-left: 6px; padding-right: 8px; }
+.pl-mes tbody th { padding-left: 12px; }
+.pl-mes .t-linha { padding-left: 24px; }
+.pl tr.t-drv th, .pl tr.t-drv td { font-size: 12.5px; }
+.pl .t-sub { padding-left: 38px !important; color: var(--muted); font-style: italic; }
+.pl td.drv { color: var(--muted); }
+.pl td.ed { padding: 1px 2px; }
+.pl td.ed input {
+  width: 74px; border: 1px solid transparent; border-radius: 3px; background: rgba(47, 111, 237, .06);
+  text-align: right; padding: 3px 5px; font-variant-numeric: tabular-nums; font-size: inherit; color: #5C7FC4;
+}
+.pl td.ed.set input { color: #1F4FB8; font-weight: 700; background: rgba(47, 111, 237, .13); }
+.pl td.ed input:hover { border-color: rgba(47, 111, 237, .35); }
+.pl td.ed input:focus { outline: none; border-color: var(--accent); background: var(--bg); color: var(--text); }
+@media (prefers-color-scheme: dark) {
+  .pl td.ed input { color: #8FA9E0; }
+  .pl td.ed.set input { color: #B5C9F5; }
+}
+.cfg { padding: 4px 22px 22px; display: grid; gap: 8px; }
+.cfg h3 { font-size: 14px; margin: 12px 0 2px; }
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 16px; }
+.cfg-contas { display: grid; gap: 5px; max-height: 260px; overflow-y: auto; padding-right: 4px; }
+.cfg .pm-in input { width: 64px; }

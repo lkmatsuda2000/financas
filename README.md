@@ -45,7 +45,7 @@ Sem isso, o link enviado por e-mail não traz você de volta ao app.
 
 - O código e a chave `anon` ficam públicos no GitHub, o que é esperado: quem protege os dados é o RLS, ligado em todas as tabelas, que só aceita o seu e-mail.
 - As views usam `security_invoker = true`, então também respeitam o RLS.
-- O app não guarda nenhum dado no navegador além da sessão de login do Supabase.
+- O app não guarda nenhum dado financeiro no navegador: só a sessão de login do Supabase e a preferência de barra lateral recolhida.
 
 ## Telas
 
@@ -57,8 +57,12 @@ Sem isso, o link enviado por e-mail não traz você de volta ao app.
 - **# transações:** lançamentos do mês, agrupados por dia, com filtros por conta e categoria. Clique em um lançamento para editar ou apagar.
 - **# cartões:** fatura em aberto e últimas compras de cada cartão.
 - **# investimentos:** aplicado, rendimento e valor atual de cada investimento, com opção de ver os encerrados.
-- **# projeção:** modelo no formato P&L. Os meses fechados vêm da base (realizado); a partir do mês seguinte ao último com dados, tudo é calculado pelas premissas (salário, reajustes, 13º, férias, bônus, gastos, aportes e divisão entre classes, retornos, câmbio, inflação e IR médio por classe). O aporte planejado sempre acontece e a diferença entre o resultado e o aporte vai para o caixa; o app avisa quando o caixa fica abaixo do mínimo. As premissas ficam na tabela `premissas_projecao` (crie com `premissas_projecao.sql`, trocando o e-mail).
+- **# projeção:** modelo no formato de planilha. Os meses fechados vêm da base (realizado); a partir do mês seguinte ao último com dados, tudo é calculado. As premissas são células do próprio P&L, na visão Mês (células azuis):
+  - **nível** (taxas, % do salário investido, divisão entre classes, IR, caixa mínimo): vale a partir do mês digitado até ser trocado;
+  - **evento** (variação do salário ou dos gastos no mês, bônus em salários): vale só no mês digitado;
+  - **linhas com fórmula** (salário, 13º, férias, gastos, aportes, dólar...): digitar um valor substitui a fórmula naquele mês; salário, gasto e dólar seguem a partir do valor digitado.
+  A barra acima da tabela permite repetir um valor todo ano no mesmo mês ou em todos os meses seguintes. Os aportes sempre acontecem e a diferença entre o resultado e os aportes vai para o caixa. As premissas são salvas automaticamente na tabela `premissas_projecao` (crie com `premissas_projecao.sql`, trocando o e-mail); horizonte, categorias de salário, classes das contas e valores de partida ficam em **Configurações**.
 
-O campo na parte de baixo de cada tela registra gastos, receitas e transferências entre contas (inclusive o pagamento de fatura, que é uma transferência da conta para o cartão).
+O botão ☰ no topo esconde ou mostra a barra lateral em qualquer tela. O campo na parte de baixo de cada tela registra gastos, receitas e transferências entre contas (inclusive o pagamento de fatura, que é uma transferência da conta para o cartão).
 
 As transferências registradas pelo app gravam os dois lados ligados pelo campo `transferencia_par_id` (cada lado aponta para o outro). Ao editar ou apagar um lado, o app altera os dois juntos. As transferências antigas da base ainda não têm essa ligação; ao abrir uma delas, o app avisa que a alteração vale só para aquele lado.

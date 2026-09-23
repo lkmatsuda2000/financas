@@ -12,7 +12,9 @@
     return;
   }
 
-  const sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  // A biblioteca acrescenta /rest/v1 e /auth/v1 sozinha: aceita a URL mesmo que venha com esses sufixos.
+  const urlBase = String(cfg.SUPABASE_URL).trim().replace(/\/+$/, '').replace(/\/(rest|auth)\/v1$/, '');
+  const sb = window.supabase.createClient(urlBase, cfg.SUPABASE_ANON_KEY);
 
   const state = {
     user: null,
@@ -43,12 +45,14 @@
     const s = new Date(iso + 'T12:00:00').toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
     return s.charAt(0).toUpperCase() + s.slice(1);
   };
+  // Datas sempre no fuso do aparelho (toISOString usaria UTC e, depois das 21h, marcaria o dia seguinte).
+  const isoLocal = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const proximoMes = (iso) => {
     const d = new Date(iso + 'T12:00:00');
     d.setMonth(d.getMonth() + 1, 1);
-    return d.toISOString().slice(0, 10);
+    return isoLocal(d);
   };
-  const hoje = () => new Date().toISOString().slice(0, 10);
+  const hoje = () => isoLocal(new Date());
 
   const iniciais = (nome) => nome.replace(/[^\p{L}\p{N} ]/gu, '').split(' ')
     .filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
@@ -111,7 +115,7 @@
       out.textContent = 'Enviando...';
       const { error } = await sb.auth.signInWithOtp({
         email,
-        options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: true }
+        options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: false }
       });
       out.textContent = error
         ? 'Não foi possível enviar o link: ' + error.message
@@ -213,6 +217,271 @@
 
   function renderRota() { renderShell(); }
 
+  // ---------- Gráficos do painel (barras empilhadas por categoria) ----------
+  // Gastos: visão "compras" (data da compra, inclusive no cartão) ou "caixa" (o que saiu das contas;
+  // o cartão entra como "Faturas de cartão" no mês em que a fatura foi paga).
+  // Entradas: receitas por categoria, com opção de incluir as extraordinárias (Doação, Herança).
+  // Só considera lançamentos em reais e ignora categorias internas (transferências, repasses, saldo inicial).
+  const FATURAS = 'Faturas de cartão';
+  const DEMAIS = 'Demais categorias';
+  const CORES_GRAF = ['#2F6FED', '#1C9A6C', '#E0A63B', '#8A5AC2', '#D8594C', '#2BA3B8', '#C2569B', '#7A8F2E'];
+  const COR_FATURAS = '#4A5866';
+  const COR_DEMAIS = '#A7B0B9';
+  const EXTRAORDINARIAS = ['Doação', 'Herança'];
+  const MAX_SERIES = 7;
+
+  const addMeses = (iso, n) => {
+    const d = new Date(iso.slice(0, 7) + '-01T12:00:00');
+    d.setMonth(d.getMonth() + n, 1);
+    return isoLocal(d);
+  };
+  const compacto = (v) => new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: v < 1000 ? 0 : 1 }).format(v);
+  // Cada categoria mantém a mesma cor em todos os gráficos e visões durante a sessão.
+  const coresFixas = new Map();
+  function corDaCategoria(nome) {
+    if (nome === FATURAS) return COR_FATURAS;
+    if (nome === DEMAIS) return COR_DEMAIS;
+    if (!coresFixas.has(nome)) coresFixas.set(nome, CORES_GRAF[coresFixas.size % CORES_GRAF.length]);
+    return coresFixas.get(nome);
+  }
+
+  const cacheTransacoes = new Map();
+  async function transacoesDoPeriodo(de, ate) {
+    const chave = de + '|' + ate;
+    if (cacheTransacoes.has(chave)) return cacheTransacoes.get(chave);
+    const tudo = [];
+    const LOTE = 1000;   // o Supabase devolve no máximo 1.000 linhas por consulta
+    for (let i = 0; ; i += LOTE) {
+      const lote = await q(sb.from('transacoes')
+        .select('conta_id, categoria_id, data_competencia, valor, tipo')
+        .eq('moeda', 'BRL')
+        .gte('data_competencia', de).lt('data_competencia', proximoMes(ate))
+        .order('data_competencia', { ascending: true }).order('id', { ascending: true })
+        .range(i, i + LOTE - 1));
+      tudo.push(...lote);
+      if (lote.length < LOTE) break;
+    }
+    cacheTransacoes.set(chave, tudo);
+    return tudo;
+  }
+
+  // Categoria de nível mais alto (agrupa subcategorias no pai).
+  function grupoDe(k) {
+    let p = k;
+    for (let i = 0; i < 5 && p && p.pai_id; i++) p = categoria(p.pai_id) || null;
+    return (p || k).nome;
+  }
+  const ehExtra = (k) => k.extraordinaria === true || EXTRAORDINARIAS.includes(grupoDe(k)) || EXTRAORDINARIAS.includes(k.nome);
+
+  function classificar(t, chave, g) {
+    const c = conta(t.conta_id);
+    const k = categoria(t.categoria_id);
+    if (!c || !k) return null;
+    const cartao = c.tipo === 'cartao_credito';
+    if (chave === 'gastos') {
+      if (g.visao === 'caixa' && cartao) {
+        return t.tipo === 'entrada' && k.nome === CAT_TRANSF ? FATURAS : null;
+      }
+      return t.tipo === 'saida' && !k.interna ? grupoDe(k) : null;
+    }
+    if (t.tipo !== 'entrada' || k.interna) return null;
+    if (!g.extra && ehExtra(k)) return null;
+    return grupoDe(k);
+  }
+
+  function mesesDisponiveis() {
+    const ms = state.meses.slice().sort();
+    if (!ms.length) return [hoje().slice(0, 8) + '01'];
+    const lista = [];
+    for (let m = ms[0]; m <= ms[ms.length - 1]; m = addMeses(m, 1)) lista.push(m);
+    return lista;
+  }
+
+  function estadoGrafico(chave) {
+    state.graf = state.graf || {};
+    if (!state.graf[chave]) {
+      const todos = mesesDisponiveis();
+      const ate = todos[todos.length - 1];
+      state.graf[chave] = { ate, de: addMeses(ate, -11) < todos[0] ? todos[0] : addMeses(ate, -11),
+        visao: 'compras', extra: false, ocultar: false, sel: null };
+    }
+    return state.graf[chave];
+  }
+
+  async function montarGrafico(el, chave) {
+    if (!el || !el.isConnected) return;
+    const g = estadoGrafico(chave);
+    const todos = mesesDisponiveis();
+    if (g.de > g.ate) [g.de, g.ate] = [g.ate, g.de];
+    const titulo = chave === 'gastos' ? 'Gastos por mês' : 'Entradas por mês';
+
+    const vez = (el._vez = (el._vez || 0) + 1);   // descarta respostas de cliques anteriores
+    let lista;
+    try {
+      const card = el.querySelector('.chart-card');
+      if (card) card.classList.add('loading');
+      else el.innerHTML = `<div class="chart-card"><h2>${titulo}</h2><div class="empty">Carregando...</div></div>`;
+      lista = await transacoesDoPeriodo(g.de, g.ate);
+    } catch (err) {
+      if (vez !== el._vez) return;
+      el.innerHTML = `<div class="chart-card"><h2>${titulo}</h2><div class="empty">Não foi possível carregar: ${esc(err.message)}</div></div>`;
+      return;
+    }
+    if (!el.isConnected || vez !== el._vez) return;
+
+    // Meses do período e totais por mês e categoria
+    const meses = [];
+    for (let m = g.de; m <= g.ate; m = addMeses(m, 1)) meses.push(m);
+    const porMes = new Map(meses.map((m) => [m, new Map()]));
+    const totalCat = new Map();
+    for (const t of lista) {
+      const grupo = classificar(t, chave, g);
+      if (!grupo) continue;
+      const m = t.data_competencia.slice(0, 8) + '01';
+      const mapa = porMes.get(m);
+      if (!mapa) continue;
+      const v = Number(t.valor) || 0;
+      mapa.set(grupo, (mapa.get(grupo) || 0) + v);
+      totalCat.set(grupo, (totalCat.get(grupo) || 0) + v);
+    }
+
+    // Séries: as maiores categorias do período; o resto vai para "Demais categorias".
+    const ordenadas = [...totalCat.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+    let principais = ordenadas.filter((n) => n !== FATURAS).slice(0, MAX_SERIES);
+    if (totalCat.has(FATURAS)) principais = [FATURAS, ...principais.slice(0, MAX_SERIES - 1)];
+    const temDemais = ordenadas.some((n) => !principais.includes(n));
+    const series = [...principais, ...(temDemais ? [DEMAIS] : [])];
+    // Cores: evita repetir cor dentro do mesmo gráfico quando há mais categorias do que cores.
+    const cor = new Map();
+    const usadas = new Set();
+    for (const n of series) {
+      let c = corDaCategoria(n);
+      if (usadas.has(c)) c = CORES_GRAF.find((x) => !usadas.has(x)) || c;
+      usadas.add(c); cor.set(n, c);
+    }
+
+    const dados = meses.map((m) => {
+      const valores = new Map(series.map((n) => [n, 0]));
+      for (const [n, v] of porMes.get(m)) {
+        const alvo = principais.includes(n) ? n : DEMAIS;
+        valores.set(alvo, valores.get(alvo) + v);
+      }
+      const total = [...valores.values()].reduce((s, v) => s + v, 0);
+      return { mes: m, valores, total };
+    });
+    const totalPeriodo = dados.reduce((s, d) => s + d.total, 0);
+    const media = meses.length ? totalPeriodo / meses.length : 0;
+    const maxTotal = Math.max(1, ...dados.map((d) => d.total));
+    if (!g.sel || !meses.includes(g.sel)) g.sel = meses[meses.length - 1];
+    const selecionado = dados.find((d) => d.mes === g.sel);
+
+    const ALTURA = 190;   // px da área das barras
+    const mostrar = !g.ocultar;
+    const colunas = dados.map((d) => {
+      const hTotal = (d.total / maxTotal) * ALTURA;
+      const segs = series.filter((n) => d.valores.get(n) > 0).map((n) => {
+        const v = d.valores.get(n);
+        const h = d.total ? (v / d.total) * hTotal : 0;
+        return `<div class="seg-bar" style="height:${h.toFixed(1)}px;background:${cor.get(n)}" title="${esc(n)}: ${esc(fmt(v))}">
+          ${mostrar && h >= 16 ? `<span>${esc(compacto(v))}</span>` : ''}</div>`;
+      }).join('');
+      return `
+        <button type="button" class="col ${d.mes === g.sel ? 'sel' : ''}" data-mes="${d.mes}"
+          aria-label="${esc(mesLongo(d.mes))}: ${esc(fmt(d.total))}" aria-pressed="${d.mes === g.sel}">
+          <div class="col-area">
+            ${mostrar && d.total > 0 ? `<div class="col-total num">${esc(compacto(d.total))}</div>` : ''}
+            <div class="stack">${segs}</div>
+          </div>
+          <div class="col-label">${esc(mesNome(d.mes))}</div>
+        </button>`;
+    }).join('');
+
+    const detalhe = selecionado && selecionado.total > 0
+      ? series.filter((n) => selecionado.valores.get(n) > 0)
+        .sort((a, b) => selecionado.valores.get(b) - selecionado.valores.get(a))
+        .map((n) => {
+          const v = selecionado.valores.get(n);
+          return `<div class="row"><span class="dot" style="background:${cor.get(n)}"></span>
+            <div class="grow">${esc(n)}</div>
+            <div class="muted num">${Math.round((v / selecionado.total) * 100)}%</div>
+            <div class="num" style="min-width:110px;text-align:right">${esc(fmt(v))}</div></div>`;
+        }).join('')
+      : '<div class="row muted">Nada registrado neste mês.</div>';
+
+    const opcoesMes = (sel) => todos.map((m) => `<option value="${m}" ${m === sel ? 'selected' : ''}>${esc(mesNome(m))}</option>`).join('');
+    const presets = [[6, '6m'], [12, '12m'], [24, '24m'], [0, 'Tudo']];
+    const presetAtivo = (n) => (n === 0
+      ? g.de === todos[0] && g.ate === todos[todos.length - 1]
+      : g.ate === todos[todos.length - 1] && g.de === addMeses(g.ate, -(n - 1)));
+
+    const alternador = chave === 'gastos'
+      ? `<div class="seg seg-sm" role="radiogroup" aria-label="Visão">
+          <label><input type="radio" name="visao-${chave}" value="compras" ${g.visao === 'compras' ? 'checked' : ''}><span>Compras</span></label>
+          <label><input type="radio" name="visao-${chave}" value="caixa" ${g.visao === 'caixa' ? 'checked' : ''}><span>Caixa</span></label>
+        </div>`
+      : `<label class="check"><input type="checkbox" data-extra ${g.extra ? 'checked' : ''}> Incluir extraordinárias</label>`;
+
+    const explicacao = chave === 'gastos'
+      ? (g.visao === 'compras'
+        ? 'Pela data da compra, inclusive as feitas no cartão.'
+        : 'Pelo que saiu das contas: o cartão aparece como fatura, no mês em que foi paga.')
+      : (g.extra ? 'Todas as receitas, inclusive doações e herança.' : 'Receitas do dia a dia, sem doações e herança.');
+
+    el.innerHTML = `
+      <div class="chart-card">
+        <div class="chart-head">
+          <div>
+            <h2>${titulo}</h2>
+            <div class="meta muted">${esc(explicacao)}${mostrar ? ` Média no período: <span class="num">${esc(fmt(media))}</span>.` : ''}</div>
+          </div>
+          <button type="button" class="icon-btn" data-ocultar aria-pressed="${g.ocultar}"
+            title="${g.ocultar ? 'Mostrar' : 'Ocultar'} valores no gráfico" aria-label="${g.ocultar ? 'Mostrar' : 'Ocultar'} valores no gráfico">
+            ${g.ocultar
+              ? '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M3 3l18 18M10.6 5.1A9.8 9.8 0 0 1 12 5c5 0 9 4.5 10 7-.4 1-1.3 2.4-2.6 3.7M6.1 6.9C4.1 8.3 2.6 10.3 2 12c1 2.5 5 7 10 7 1.7 0 3.3-.5 4.7-1.3M9.9 10a3 3 0 0 0 4.1 4.1"/></svg>'
+              : '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" d="M2 12c1-2.5 5-7 10-7s9 4.5 10 7c-1 2.5-5 7-10 7S3 14.5 2 12z"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>'}
+          </button>
+        </div>
+        <div class="chart-controls">
+          ${alternador}
+          <div class="periodo">
+            ${presets.map(([n, r]) => `<button type="button" class="chip-btn ${presetAtivo(n) ? 'on' : ''}" data-preset="${n}">${r}</button>`).join('')}
+            <span class="intervalo">
+              <select data-de aria-label="Mês inicial">${opcoesMes(g.de)}</select>
+              <span class="muted">até</span>
+              <select data-ate aria-label="Mês final">${opcoesMes(g.ate)}</select>
+            </span>
+          </div>
+        </div>
+        <div class="chart-scroll"><div class="chart" style="--n:${meses.length};grid-template-columns:repeat(${meses.length}, minmax(44px, 1fr))">${colunas}</div></div>
+        <div class="chart-legend">
+          ${series.map((n) => `<span><i style="background:${cor.get(n)}"></i>${esc(n)}</span>`).join('') || '<span class="muted">Nada registrado no período.</span>'}
+        </div>
+        <div class="chart-detail">
+          <h3>${esc(mesLongo(g.sel))} <span class="num">${esc(fmt(selecionado ? selecionado.total : 0))}</span></h3>
+          <div class="rows">${detalhe}</div>
+        </div>
+      </div>`;
+
+    const scroll = el.querySelector('.chart-scroll');
+    const colSel = el.querySelector('.col.sel');
+    if (colSel) scroll.scrollLeft = Math.max(0, colSel.offsetLeft - scroll.clientWidth + colSel.offsetWidth + 16);
+
+    const redesenhar = () => montarGrafico(el, chave);
+    el.querySelector('[data-ocultar]').onclick = () => { g.ocultar = !g.ocultar; redesenhar(); };
+    el.querySelectorAll('.col').forEach((b) => b.addEventListener('click', () => { g.sel = b.dataset.mes; redesenhar(); }));
+    el.querySelectorAll(`input[name="visao-${chave}"]`).forEach((r) => r.addEventListener('change', (e) => { g.visao = e.target.value; redesenhar(); }));
+    const extra = el.querySelector('[data-extra]');
+    if (extra) extra.onchange = (e) => { g.extra = e.target.checked; redesenhar(); };
+    el.querySelector('[data-de]').onchange = (e) => { g.de = e.target.value; redesenhar(); };
+    el.querySelector('[data-ate]').onchange = (e) => { g.ate = e.target.value; redesenhar(); };
+    el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+      const n = Number(b.dataset.preset);
+      g.ate = todos[todos.length - 1];
+      g.de = n === 0 ? todos[0] : (addMeses(g.ate, -(n - 1)) < todos[0] ? todos[0] : addMeses(g.ate, -(n - 1)));
+      redesenhar();
+    }));
+  }
+
   // ---------- # painel ----------
   async function renderPainel(body) {
     const ativos = state.posicao.filter((p) => p.ativo);
@@ -226,6 +495,9 @@
     const porTipo = (tipos) => ativos.filter((p) => tipos.includes(p.tipo) && Number(p.valor_atual) !== 0);
 
     body.innerHTML = `
+      <div class="block chart-block" id="g-gastos"></div>
+      <div class="block chart-block" id="g-entradas"></div>
+
       <div class="intro">
         <div class="big num">${esc(fmt(total('BRL'), 'BRL'))}</div>
         <div class="sub">de patrimônio, mais <span class="num">${esc(fmt(total('USD'), 'USD'))}</span> em dólar</div>
@@ -278,6 +550,8 @@
           ${porTipo(['investimento', 'outro']).sort((a, b) => b.valor_atual - a.valor_atual).map(linhaConta).join('')}
         </div>
       </div>`;
+    montarGrafico(document.getElementById('g-gastos'), 'gastos');
+    montarGrafico(document.getElementById('g-entradas'), 'entradas');
   }
 
   function linhaConta(p) {
@@ -296,7 +570,7 @@
   async function renderTransacoes(body) {
     const f = state.filtros;
     let consulta = sb.from('transacoes')
-      .select('id, conta_id, categoria_id, data_competencia, valor, moeda, descricao, tipo')
+      .select('id, conta_id, categoria_id, data_competencia, valor, moeda, descricao, tipo, transferencia_par_id')
       .gte('data_competencia', f.mes).lt('data_competencia', proximoMes(f.mes))
       .order('data_competencia', { ascending: true }).order('criado_em', { ascending: true })
       .limit(1000);
@@ -317,7 +591,7 @@
         <select id="f-conta" aria-label="Conta"><option value="">Todas as contas</option>
           ${state.contas.filter((c) => c.ativo || c.id === f.conta).map((c) => `<option value="${c.id}" ${c.id === f.conta ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select>
         <select id="f-cat" aria-label="Categoria"><option value="">Todas as categorias</option>
-          ${nomesCat.map((c) => `<option value="${c.nome}" ${f.categoriaNome === c.nome ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select>
+          ${nomesCat.map((c) => `<option value="${esc(c.nome)}" ${f.categoriaNome === c.nome ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select>
       </div>`;
 
     if (!lista.length) {
@@ -433,36 +707,72 @@
   }
 
   // ---------- Formulário de lançamento ----------
-  function abrirForm(t) {
+  // Transferências: os dois lados ficam ligados por transferencia_par_id (cada um aponta para o outro),
+  // e editar ou apagar age sempre no par inteiro.
+  const CAT_TRANSF = 'Transferencia entre contas';
+  const catTransf = (tipoCat) => (state.categorias.find((c) => c.nome === CAT_TRANSF && c.tipo === tipoCat)
+    || state.categorias.find((c) => c.nome === CAT_TRANSF) || {}).id;
+
+  async function abrirForm(t) {
     const editando = !!t;
-    const ativas = state.contas.filter((c) => c.ativo || (t && c.id === t.conta_id));
+
+    // Se for um lado de transferência ligada, busca o outro lado.
+    let par = null;
+    if (t && t.transferencia_par_id) {
+      try {
+        const outro = await q(sb.from('transacoes')
+          .select('id, conta_id, categoria_id, data_competencia, valor, moeda, descricao, tipo, transferencia_par_id')
+          .eq('id', t.transferencia_par_id).maybeSingle());
+        if (outro) par = t.tipo === 'saida' ? { saida: t, entrada: outro } : { saida: outro, entrada: t };
+      } catch (err) {
+        toast('Não foi possível carregar o outro lado da transferência');
+        return;
+      }
+    }
+    const editandoTransf = !!par;
+    const transfSolta = editando && !par && (categoria(t.categoria_id) || {}).nome === CAT_TRANSF;
+
+    const ativas = state.contas.filter((c) => c.ativo
+      || (t && c.id === t.conta_id)
+      || (par && (c.id === par.saida.conta_id || c.id === par.entrada.conta_id)));
     const opcoesConta = (sel) => ativas.map((c) => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.nome)} (${esc(c.moeda)})</option>`).join('');
-    const tipoInicial = t ? t.tipo : 'saida';
+    const tipoInicial = editandoTransf ? 'transf' : (t ? t.tipo : 'saida');
+    const fmtCampo = (v) => (v == null ? '' : String(v).replace('.', ','));
+
+    // Descrição automática não é reaproveitada na edição: é refeita com os nomes das contas escolhidas.
+    let descInicial = t ? (t.descricao || '') : '';
+    if (editandoTransf) {
+      const nomeDestino = (conta(par.entrada.conta_id) || {}).nome;
+      descInicial = par.saida.descricao === 'Transferência para ' + nomeDestino ? '' : (par.saida.descricao || '');
+    }
+
+    const radios = editandoTransf
+      ? '<label><input type="radio" name="tipo" value="transf" checked><span>Transferência</span></label>'
+      : `<label><input type="radio" name="tipo" value="saida" ${tipoInicial === 'saida' ? 'checked' : ''}><span>Gasto</span></label>
+         <label><input type="radio" name="tipo" value="entrada" ${tipoInicial === 'entrada' ? 'checked' : ''}><span>Receita</span></label>
+         ${editando ? '' : '<label><input type="radio" name="tipo" value="transf"><span>Transferência</span></label>'}`;
 
     const back = document.createElement('div');
     back.className = 'modal-back';
     back.innerHTML = `
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-titulo">
-        <header><h2 id="m-titulo">${editando ? 'Editar lançamento' : 'Novo lançamento'}</h2>
+        <header><h2 id="m-titulo">${editandoTransf ? 'Editar transferência' : (editando ? 'Editar lançamento' : 'Novo lançamento')}</h2>
           <button class="close" type="button" aria-label="Fechar">×</button></header>
         <form novalidate>
-          <div class="seg" role="radiogroup" aria-label="Tipo">
-            <label><input type="radio" name="tipo" value="saida" ${tipoInicial === 'saida' ? 'checked' : ''}><span>Gasto</span></label>
-            <label><input type="radio" name="tipo" value="entrada" ${tipoInicial === 'entrada' ? 'checked' : ''}><span>Receita</span></label>
-            ${editando ? '' : '<label><input type="radio" name="tipo" value="transf"><span>Transferência</span></label>'}
-          </div>
+          <div class="seg" role="radiogroup" aria-label="Tipo">${radios}</div>
+          ${transfSolta ? '<p class="muted" style="margin:0;font-size:13px">Este lançamento é um lado de uma transferência antiga, sem ligação com o outro lado. Alterar ou apagar mexe só nele.</p>' : ''}
           <div class="two">
-            <div class="field"><label for="m-valor">Valor</label><input id="m-valor" inputmode="decimal" placeholder="0,00" value="${t ? String(t.valor).replace('.', ',') : ''}"></div>
-            <div class="field"><label for="m-data">Data</label><input id="m-data" type="date" value="${t ? t.data_competencia : hoje()}"></div>
+            <div class="field"><label for="m-valor">Valor</label><input id="m-valor" inputmode="decimal" placeholder="0,00" value="${esc(fmtCampo(editandoTransf ? par.saida.valor : (t && t.valor)))}"></div>
+            <div class="field"><label for="m-data">Data</label><input id="m-data" type="date" value="${esc(editandoTransf ? par.saida.data_competencia : (t ? t.data_competencia : hoje()))}"></div>
           </div>
-          <div class="field" id="w-conta"><label for="m-conta">Conta</label><select id="m-conta">${opcoesConta(t ? t.conta_id : '')}</select></div>
+          <div class="field" id="w-conta"><label for="m-conta">Conta</label><select id="m-conta">${opcoesConta(t && !editandoTransf ? t.conta_id : '')}</select></div>
           <div class="field" id="w-cat"><label for="m-cat">Categoria</label><select id="m-cat"></select></div>
           <div class="two" id="w-transf" hidden>
-            <div class="field"><label for="m-origem">Sai de</label><select id="m-origem">${opcoesConta('')}</select></div>
-            <div class="field"><label for="m-destino">Entra em</label><select id="m-destino">${opcoesConta('')}</select></div>
+            <div class="field"><label for="m-origem">Sai de</label><select id="m-origem">${opcoesConta(editandoTransf ? par.saida.conta_id : '')}</select></div>
+            <div class="field"><label for="m-destino">Entra em</label><select id="m-destino">${opcoesConta(editandoTransf ? par.entrada.conta_id : '')}</select></div>
           </div>
-          <div class="field" id="w-valor2" hidden><label for="m-valor2">Valor recebido (moeda do destino)</label><input id="m-valor2" inputmode="decimal" placeholder="0,00"></div>
-          <div class="field"><label for="m-desc">Descrição</label><input id="m-desc" maxlength="200" value="${t ? esc(t.descricao || '') : ''}"></div>
+          <div class="field" id="w-valor2" hidden><label for="m-valor2">Valor recebido (moeda do destino)</label><input id="m-valor2" inputmode="decimal" placeholder="0,00" value="${esc(editandoTransf ? fmtCampo(par.entrada.valor) : '')}"></div>
+          <div class="field"><label for="m-desc">Descrição</label><input id="m-desc" maxlength="200" value="${esc(descInicial)}"></div>
           <div class="form-error" id="m-erro"></div>
           <div class="actions">
             ${editando ? '<button class="btn danger" type="button" id="m-apagar">Apagar</button><span class="spacer"></span>' : ''}
@@ -498,24 +808,32 @@
       $('#w-valor2').hidden = !(transf && o && d && o.moeda !== d.moeda);
     }
     back.querySelectorAll('input[name="tipo"]').forEach((r) => r.addEventListener('change', atualizarCampos));
-    if (ativas.length > 1) $('#m-destino').selectedIndex = 1;
+    if (!editandoTransf && ativas.length > 1) $('#m-destino').selectedIndex = 1;
     $('#m-origem').onchange = atualizarCampos;
     $('#m-destino').onchange = atualizarCampos;
     atualizarCampos();
     setTimeout(() => $('#m-valor').focus(), 30);
 
+    // Aceita "1.234,56", "1234,56", "35.98" e "1.234". Com vírgula, o ponto é milhar;
+    // sem vírgula, o ponto é decimal, exceto no formato de milhar (1.234 ou 12.345.678).
     const lerValor = (s) => {
-      const v = Number(String(s).trim().replace(/\./g, '').replace(',', '.'));
+      let txt = String(s).trim().replace(/\s|R\$/g, '');
+      if (!txt) return NaN;
+      if (txt.includes(',')) txt = txt.replace(/\./g, '').replace(',', '.');
+      else if (/^\d{1,3}(\.\d{3})+$/.test(txt)) txt = txt.replace(/\./g, '');
+      if (!/^\d+(\.\d+)?$/.test(txt)) return NaN;
+      const v = Number(txt);
       return Number.isFinite(v) ? Math.round(v * 100) / 100 : NaN;
     };
 
     $('form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const erro = $('#m-erro');
+      erro.textContent = '';
       const valor = lerValor($('#m-valor').value);
       const data = $('#m-data').value;
       const descricao = $('#m-desc').value.trim() || null;
-      if (!(valor > 0)) { erro.textContent = 'Informe um valor maior que zero.'; return; }
+      if (!(valor > 0)) { erro.textContent = 'Informe um valor maior que zero (ex.: 35,98).'; return; }
       if (!data) { erro.textContent = 'Informe a data.'; return; }
 
       const btn = $('#m-salvar');
@@ -531,16 +849,26 @@
             valorDestino = lerValor($('#m-valor2').value);
             if (!(valorDestino > 0)) throw new Error('Informe o valor recebido na moeda do destino.');
           }
-          const catT = (tipoCat) => (state.categorias.find((c) => c.nome === 'Transferencia entre contas' && c.tipo === tipoCat)
-            || state.categorias.find((c) => c.nome === 'Transferencia entre contas') || {}).id;
-          if (!catT('saida')) throw new Error('A categoria "Transferencia entre contas" não foi encontrada.');
-          await q(sb.from('transacoes').insert([
-            { conta_id: o.id, categoria_id: catT('saida'), data_competencia: data, valor, moeda: o.moeda, tipo: 'saida',
+          if (!catTransf('saida')) throw new Error('A categoria "' + CAT_TRANSF + '" não foi encontrada.');
+
+          const idSaida = editandoTransf ? par.saida.id : crypto.randomUUID();
+          const idEntrada = editandoTransf ? par.entrada.id : crypto.randomUUID();
+          const linhas = [
+            { id: idSaida, transferencia_par_id: idEntrada, conta_id: o.id, categoria_id: catTransf('saida'),
+              data_competencia: data, valor, moeda: o.moeda, tipo: 'saida',
               descricao: descricao || 'Transferência para ' + d.nome },
-            { conta_id: d.id, categoria_id: catT('entrada'), data_competencia: data, valor: valorDestino, moeda: d.moeda, tipo: 'entrada',
+            { id: idEntrada, transferencia_par_id: idSaida, conta_id: d.id, categoria_id: catTransf('entrada'),
+              data_competencia: data, valor: valorDestino, moeda: d.moeda, tipo: 'entrada',
               descricao: descricao || 'Transferência de ' + o.nome }
-          ]));
-          toast('Transferência registrada');
+          ];
+          // Uma única chamada grava os dois lados juntos: ou os dois entram, ou nenhum.
+          if (editandoTransf) {
+            await q(sb.from('transacoes').upsert(linhas, { onConflict: 'id' }));
+            toast('Transferência atualizada');
+          } else {
+            await q(sb.from('transacoes').insert(linhas));
+            toast('Transferência registrada');
+          }
         } else {
           const c = conta($('#m-conta').value);
           const catId = $('#m-cat').value;
@@ -565,10 +893,14 @@
 
     if (editando) {
       $('#m-apagar').onclick = async () => {
-        if (!confirm('Apagar este lançamento? Não dá para desfazer.')) return;
+        const texto = editandoTransf
+          ? 'Apagar esta transferência? Os dois lados (saída e entrada) serão apagados. Não dá para desfazer.'
+          : 'Apagar este lançamento? Não dá para desfazer.';
+        if (!confirm(texto)) return;
         try {
-          await q(sb.from('transacoes').delete().eq('id', t.id));
-          toast('Lançamento apagado');
+          const ids = editandoTransf ? [par.saida.id, par.entrada.id] : [t.id];
+          await q(sb.from('transacoes').delete().in('id', ids));
+          toast(editandoTransf ? 'Transferência apagada' : 'Lançamento apagado');
           fechar();
           await recarregar();
         } catch (err) { $('#m-erro').textContent = err.message; }
@@ -577,6 +909,7 @@
   }
 
   async function recarregar() {
+    cacheTransacoes.clear();
     await carregarBase();
     renderShell();
   }
